@@ -30,7 +30,7 @@ A sales ops dashboard tracking whether AEs called a lead within 2 hours of an op
 | Pending | Status changed < 2 hrs ago — still within SLA window |
 
 ## Architecture
-- `pull_data.py` runs on a GitHub Actions cron (every 30 min). It fetches from Close CRM and inserts a snapshot row into Supabase (`dashboard_snapshots` table, JSONB column).
+- `pull_data.py` runs on a GitHub Actions cron (every 6 hours). It fetches from Close CRM and inserts a snapshot row into Supabase (`dashboard_snapshots` table, JSONB column).
 - The frontend is a static site (HTML + vanilla JS) deployed to Vercel. It fetches the latest snapshot directly from Supabase via PostgREST using the public publishable key.
 - No server, no long-running process. Read with publishable key (RLS-restricted to SELECT). Write with secret key (CI only).
 
