@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Speed-to-Call Dashboard 2.0</title>
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+
+<div style="display:flex;justify-content:space-between;align-items:flex-start;">
+  <div>
+    <h1>Speed-to-Call Dashboard</h1>
+    <p class="subtitle">Tracking call response time after opportunity moves from <strong>Ready to Respond</strong> → <strong>Active Scenario</strong> / <strong>Declined Scenario</strong> / <strong>Addl Info Needed</strong></p>
+    <p class="meta" id="meta"></p>
+  </div>
+  <button class="refresh-btn" onclick="refreshData()" id="refreshBtn">Refresh Data</button>
+</div>
+
+<div class="date-range" id="dateRange">
+  <button data-range="all" class="active">All <span class="count-badge">--</span></button>
+</div>
+
+<p class="range-info" id="rangeInfo"></p>
+
+<div class="cards">
+  <div class="card green" data-filter="within" onclick="filterBy('within')">
+    <div class="count" id="withinCount">--</div>
+    <div class="pct" id="withinPct"></div>
+    <div class="label">Called within 2 hrs</div>
+  </div>
+  <div class="card orange" data-filter="after" onclick="filterBy('after')">
+    <div class="count" id="afterCount">--</div>
+    <div class="pct" id="afterPct"></div>
+    <div class="label">Called after 2 hrs</div>
+  </div>
+  <div class="card red" data-filter="never" onclick="filterBy('never')">
+    <div class="count" id="neverCount">--</div>
+    <div class="pct" id="neverPct"></div>
+    <div class="label">Never called</div>
+  </div>
+</div>
+
+
+<h2 class="section-title">AE Summary</h2>
+<table class="ae-table">
+  <thead>
+    <tr>
+      <th onclick="sortAETable(0)">AE <span class="ae-arrow"></span></th>
+      <th onclick="sortAETable(1)">Total <span class="ae-arrow"></span></th>
+      <th onclick="sortAETable(2)">Within 2 hrs <span class="ae-arrow"></span></th>
+      <th onclick="sortAETable(3)">After 2 hrs <span class="ae-arrow"></span></th>
+      <th onclick="sortAETable(4)">Never Called <span class="ae-arrow"></span></th>
+      <th onclick="sortAETable(5)">Pending <span class="ae-arrow"></span></th>
+      <th onclick="sortAETable(6)">Call Rate <span class="ae-arrow"></span></th>
+      <th onclick="sortAETable(7)">Avg Mins <span class="ae-arrow"></span></th>
+    </tr>
+  </thead>
+  <tbody id="aeTableBody"></tbody>
+</table>
+
+<h2 class="section-title" style="margin-top:32px;">Lead Detail</h2>
+<div class="filter-row">
+  <div class="filters" id="bucketFilters">
+    <button data-bucket="all" class="active" onclick="filterBy('all')">All</button>
+    <button data-bucket="within" onclick="filterBy('within')">Within 2 hrs</button>
+    <button data-bucket="after" onclick="filterBy('after')">After 2 hrs</button>
+    <button data-bucket="never" onclick="filterBy('never')">Never called</button>
+    <button data-bucket="pending" onclick="filterBy('pending')">Still pending</button>
+  </div>
+  <div class="ae-filter">
+    <label for="transFilter">Transition:</label>
+    <select id="transFilter" onchange="filterByTransition(this.value)">
+      <option value="all">All</option>
+    </select>
+  </div>
+  <div class="ae-filter">
+    <label for="aeFilter">AE:</label>
+    <select id="aeFilter" onchange="filterByAE(this.value)">
+      <option value="all">All AEs</option>
+    </select>
+  </div>
+</div>
+
+<table>
+  <thead>
+    <tr>
+      <th onclick="sortTable(0)">Contact <span class="arrow"></span></th>
+      <th onclick="sortTable(1)">AE <span class="arrow"></span></th>
+      <th onclick="sortTable(2)">Transition <span class="arrow"></span></th>
+      <th onclick="sortTable(3)">Status Changed (UTC) <span class="arrow"></span></th>
+      <th onclick="sortTable(4)">First Call (UTC) <span class="arrow"></span></th>
+      <th onclick="sortTable(5)">Mins to Call <span class="arrow">▲</span></th>
+      <th onclick="sortTable(6)">Bucket <span class="arrow"></span></th>
+      <th>Close</th>
+    </tr>
+  </thead>
+  <tbody id="tableBody">
+    <tr><td colspan="8" class="loading">Loading data...</td></tr>
+  </tbody>
+</table>
+
+<div class="note">
+  <strong>Eligible</strong> = leads where 2+ hours have elapsed since the status change.
+  <strong>Pending</strong> = status changed less than 2 hours ago — still within the SLA window.
+  <strong>Call rate</strong> = % of eligible leads that received any post-trigger call.
+</div>
+
+<script src="js/app.js"></script>
+
+</body>
+</html>
