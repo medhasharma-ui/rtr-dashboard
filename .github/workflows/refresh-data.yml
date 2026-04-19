@@ -1,0 +1,21 @@
+name: Refresh dashboard data
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt
+      - run: python pull_data.py --days 7
+        env:
+          CLOSE_API_KEY: ${{ secrets.CLOSE_API_KEY }}
+          SUPABASE_URL: https://ercbzutulfrerwmkndhy.supabase.co
+          SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}

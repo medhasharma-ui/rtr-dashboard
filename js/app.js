@@ -1,3 +1,7 @@
+// ── Config ──
+const SUPABASE_URL = "https://ercbzutulfrerwmkndhy.supabase.co";
+const SUPABASE_ANON_KEY = "sb_publishable_tlU-oHKcVblfTHjc_YF7sw_hW4lubGo";
+
 // ── State ──
 let dashData = null;
 let activeRange = "all";
@@ -12,16 +16,21 @@ let aeSortAsc = true;
 // ── Load data ──
 async function loadData() {
   try {
-    const resp = await fetch("data/dashboard_data.json?t=" + Date.now());
-    if (!resp.ok) throw new Error("No data file found");
-    dashData = await resp.json();
+    const resp = await fetch(
+      `${SUPABASE_URL}/rest/v1/dashboard_snapshots?select=data,generated_at&order=generated_at.desc&limit=1`,
+      { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` } }
+    );
+    if (!resp.ok) throw new Error("Supabase fetch failed: " + resp.status);
+    const rows = await resp.json();
+    if (!rows.length) throw new Error("No snapshots found");
+    dashData = rows[0].data;
     buildDateButtons();
     render();
     document.getElementById("meta").textContent =
       `Data pulled: ${new Date(dashData.generated_at).toLocaleString()} | Range: ${dashData.start_date} to ${dashData.end_date}`;
   } catch (e) {
     document.getElementById("tableBody").innerHTML =
-      '<tr><td colspan="8" class="loading">No data file found. Run pull_data.py to generate data.</td></tr>';
+      `<tr><td colspan="8" class="loading">Could not load data: ${e.message}</td></tr>`;
   }
 }
 
@@ -255,40 +264,6 @@ function render() {
       <td style="text-align:center">${link}</td>
     </tr>`;
   }).join("");
-}
-
-// ── Refresh from Close CRM ──
-async function refreshData() {
-  const btn = document.getElementById("refreshBtn");
-  btn.disabled = true;
-  btn.textContent = "Refreshing...";
-  try {
-    await fetch("/api/refresh?days=7");
-    // Poll until data file is updated
-    const oldGenerated = dashData ? dashData.generated_at : null;
-    let attempts = 0;
-    const poll = setInterval(async () => {
-      attempts++;
-      try {
-        const resp = await fetch("data/dashboard_data.json?t=" + Date.now());
-        const newData = await resp.json();
-        if (newData.generated_at !== oldGenerated || attempts > 120) {
-          clearInterval(poll);
-          dashData = newData;
-          buildDateButtons();
-          render();
-          document.getElementById("meta").textContent =
-            `Data pulled: ${new Date(dashData.generated_at).toLocaleString()} | Range: ${dashData.start_date} to ${dashData.end_date}`;
-          btn.disabled = false;
-          btn.textContent = "Refresh Data";
-        }
-      } catch (e) { /* keep polling */ }
-    }, 5000);
-  } catch (e) {
-    btn.disabled = false;
-    btn.textContent = "Refresh Data";
-    alert("Could not reach server. Is server.py running?");
-  }
 }
 
 // Boot

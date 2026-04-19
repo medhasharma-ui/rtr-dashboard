@@ -11,13 +11,15 @@ Usage:
 """
 
 import argparse
-import json
 import os
 import sys
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import requests
+from dotenv import load_dotenv
+from supabase import create_client
+
+load_dotenv()
 
 BASE_URL = "https://api.close.com/api/v1"
 
@@ -214,7 +216,6 @@ def main():
     parser.add_argument("--days", type=int, help="Pull last N days of data")
     parser.add_argument("--start", type=str, help="Start date (YYYY-MM-DD)")
     parser.add_argument("--end", type=str, help="End date (YYYY-MM-DD)")
-    parser.add_argument("--output", type=str, default="data/dashboard_data.json", help="Output file path")
     args = parser.parse_args()
 
     api_key = get_api_key()
@@ -291,13 +292,19 @@ def main():
         "all": results,
     }
 
-    # Write output
-    output_path = Path(__file__).parent / args.output
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "w") as f:
-        json.dump(output, f, indent=2)
+    # Write to Supabase
+    supabase_url = os.environ.get("SUPABASE_URL")
+    supabase_key = os.environ.get("SUPABASE_SECRET_KEY")
+    if not supabase_url or not supabase_key:
+        print("Error: Set SUPABASE_URL and SUPABASE_SECRET_KEY environment variables")
+        sys.exit(1)
 
-    # Summary
+    supabase = create_client(supabase_url, supabase_key)
+    supabase.table("dashboard_snapshots").insert({
+        "generated_at": output["generated_at"],
+        "data": output,
+    }).execute()
+
     within = sum(1 for r in results if r["bucket"] == "within")
     after = sum(1 for r in results if r["bucket"] == "after")
     never = sum(1 for r in results if r["bucket"] == "never")
@@ -308,7 +315,7 @@ def main():
     print(f"  After 2 hrs:  {after}")
     print(f"  Never called: {never}")
     print(f"  Pending:      {pending}")
-    print(f"\nOutput: {output_path}")
+    print(f"\nSnapshot inserted into Supabase.")
 
 
 if __name__ == "__main__":

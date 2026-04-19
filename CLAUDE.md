@@ -29,35 +29,36 @@ A sales ops dashboard tracking whether AEs called a lead within 2 hours of an op
 | Never called | No call activity found after status change |
 | Pending | Status changed < 2 hrs ago — still within SLA window |
 
+## Architecture
+- `pull_data.py` runs on a GitHub Actions cron (every 30 min). It fetches from Close CRM and inserts a snapshot row into Supabase (`dashboard_snapshots` table, JSONB column).
+- The frontend is a static site (HTML + vanilla JS) deployed to Vercel. It fetches the latest snapshot directly from Supabase via PostgREST using the public publishable key.
+- No server, no long-running process. Read with publishable key (RLS-restricted to SELECT). Write with secret key (CI only).
+
 ## Project Structure
 ```
-pull_data.py        — fetches data from Close API, outputs data/dashboard_data.json
-index.html          — main dashboard page
-css/styles.css      — all styling
-js/app.js           — dashboard logic (filtering, sorting, rendering)
-data/               — generated JSON data files
-CLAUDE.md           — this file
+pull_data.py                       — fetches from Close, inserts snapshot into Supabase
+requirements.txt                   — Python deps (requests, supabase, python-dotenv)
+.github/workflows/refresh-data.yml — cron schedule for pull_data.py
+index.html                         — main dashboard page
+css/styles.css                     — all styling
+js/app.js                          — reads snapshot from Supabase, renders dashboard
+vercel.json                        — Vercel static deploy config
+CLAUDE.md                          — this file
 ```
 
-## How to run
-1. Create `.env` file with your Close API key:
-   ```
-   echo 'CLOSE_API_KEY=your_key_here' > .env
-   ```
-2. Run the startup script:
-   ```
-   ./start.sh
-   ```
-3. Open http://rtr-dashboard.local:8080
+## Supabase
+- Project URL: `https://ercbzutulfrerwmkndhy.supabase.co`
+- Table: `dashboard_snapshots(id uuid, generated_at timestamptz, data jsonb)`
+- RLS: `select` allowed for anon/publishable key; writes require secret key.
+- Frontend embeds the publishable key (safe). Secret key lives only in GitHub Secrets.
 
-The server pulls live data from Close on startup (last 7 days) and serves the dashboard.
-Click "Refresh Data" button on the dashboard to re-pull from Close.
-
-## Manual data pull (without server)
+## Local data pull
 ```
-export CLOSE_API_KEY=your_key_here
+cp .env.example .env   # then fill in keys
+pip install -r requirements.txt
 python3 pull_data.py --days 7
 ```
+Reload the browser to see the new snapshot.
 
 ## Close API Auth
 Uses HTTP Basic auth with API key as username, empty password.
