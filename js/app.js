@@ -37,26 +37,27 @@ async function loadData() {
 // ── Build date range buttons dynamically ──
 function buildDateButtons() {
   const container = document.getElementById("dateRange");
-  const dates = Object.keys(dashData.by_date).sort();
-
-  // "All" button
-  let html = `<button data-range="all" class="active" onclick="setRange('all')">All <span class="count-badge">${dashData.all.length}</span></button>`;
-
-  // Today / Yesterday
   const today = new Date().toISOString().slice(0, 10);
   const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+  const dates = Object.keys(dashData.by_date).sort();
 
+  let html = `<button data-range="all" class="active" onclick="setRange('all')">All <span class="count-badge">${dashData.all.length}</span></button>`;
+
+  // Older dates (excluding today/yesterday — those are pinned at the end)
   for (const date of dates) {
+    if (date === today || date === yesterday) continue;
     const count = dashData.by_date[date].length;
-    let label = date;
-    if (date === today) label = "Today";
-    else if (date === yesterday) label = "Yesterday";
-    else {
-      const d = new Date(date + "T12:00:00Z");
-      label = d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
-    }
+    const d = new Date(date + "T12:00:00Z");
+    const label = d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
     html += `<button data-range="${date}" onclick="setRange('${date}')">${label} <span class="count-badge">${count}</span></button>`;
   }
+
+  // Always show Yesterday then Today at the end (count = 0 if no data)
+  const yesterdayCount = (dashData.by_date[yesterday] || []).length;
+  html += `<button data-range="${yesterday}" onclick="setRange('${yesterday}')">Yesterday <span class="count-badge">${yesterdayCount}</span></button>`;
+
+  const todayCount = (dashData.by_date[today] || []).length;
+  html += `<button data-range="${today}" onclick="setRange('${today}')">Today <span class="count-badge">${todayCount}</span></button>`;
 
   container.innerHTML = html;
 }
