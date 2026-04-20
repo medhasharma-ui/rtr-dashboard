@@ -224,15 +224,19 @@ def main():
     if args.days:
         end_date = now.strftime("%Y-%m-%d")
         start_date = (now - timedelta(days=args.days)).strftime("%Y-%m-%d")
+        api_end = now.isoformat()
     elif args.start and args.end:
         start_date = args.start
         end_date = args.end
+        api_end = f"{args.end}T23:59:59+00:00"
     else:
         print("Specify --days N or --start/--end dates")
         sys.exit(1)
 
-    # Step 1: Get RTR → Active Scenario transitions
-    transitions = fetch_rtr_transitions(api_key, start_date, end_date)
+    # Step 1: Get RTR → Active Scenario transitions.
+    # api_end is a full timestamp so Close includes today's activity — a bare
+    # YYYY-MM-DD gets interpreted as 00:00Z and silently drops same-day rows.
+    transitions = fetch_rtr_transitions(api_key, start_date, api_end)
 
     if not transitions:
         print("No transitions found. Check date range.")
