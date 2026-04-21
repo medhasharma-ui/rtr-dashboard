@@ -14,6 +14,7 @@ import argparse
 import os
 import sys
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import requests
 from dotenv import load_dotenv
@@ -22,6 +23,11 @@ from supabase import create_client
 load_dotenv()
 
 BASE_URL = "https://api.close.com/api/v1"
+
+# FlyHomes' business day runs on Pacific time — bucket snapshots accordingly
+# so the Today/Yesterday tabs don't flip when a PT user views the dashboard
+# after midnight UTC.
+PT = ZoneInfo("America/Los_Angeles")
 
 # Close CRM IDs (REQ Pipeline)
 RTR_STATUS_ID = "stat_AZ0tc4F8UzLQJyVG9vLH23R5RpMnIZdUkiNH7xvvVeb"
@@ -220,10 +226,11 @@ def main():
 
     api_key = get_api_key()
     now = datetime.now(timezone.utc)
+    pt_now = now.astimezone(PT)
 
     if args.days:
-        end_date = now.strftime("%Y-%m-%d")
-        start_date = (now - timedelta(days=args.days)).strftime("%Y-%m-%d")
+        end_date = pt_now.strftime("%Y-%m-%d")
+        start_date = (pt_now - timedelta(days=args.days)).strftime("%Y-%m-%d")
         api_end = now.isoformat()
     elif args.start and args.end:
         start_date = args.start
@@ -281,10 +288,11 @@ def main():
             "transition": t.get("transition", "Active Scenario"),
         })
 
-    # Group by date for the dashboard
+    # Group by PT date for the dashboard (business-day bucketing)
     by_date = {}
     for r in results:
-        date_key = r["changedAt"][:10]
+        changed_at_utc = datetime.fromisoformat(r["changedAt"].replace("Z", "+00:00"))
+        date_key = changed_at_utc.astimezone(PT).strftime("%Y-%m-%d")
         by_date.setdefault(date_key, []).append(r)
 
     output = {

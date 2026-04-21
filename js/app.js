@@ -35,10 +35,15 @@ async function loadData() {
 }
 
 // ── Build date range buttons dynamically ──
+// PT-based date keys match the backend's business-day bucketing.
+function ptDateKey(date) {
+  return date.toLocaleDateString("en-CA", { timeZone: "America/Los_Angeles" });
+}
+
 function buildDateButtons() {
   const container = document.getElementById("dateRange");
-  const today = new Date().toISOString().slice(0, 10);
-  const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+  const today = ptDateKey(new Date());
+  const yesterday = ptDateKey(new Date(Date.now() - 86400000));
   const dates = Object.keys(dashData.by_date).sort();
 
   let html = `<button data-range="all" class="active" onclick="setRange('all')">All <span class="count-badge">${dashData.all.length}</span></button>`;
