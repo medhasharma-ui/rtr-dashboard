@@ -6,7 +6,7 @@ const SUPABASE_ANON_KEY = "sb_publishable_tlU-oHKcVblfTHjc_YF7sw_hW4lubGo";
 let dashData = null;
 let activeRange = "all";
 let currentFilter = "all";
-let currentAE = "all";
+let currentAEs = [];                  // empty = all AEs
 let currentTransition = "all";
 let sortCol = 5;
 let sortAsc = true;
@@ -71,15 +71,23 @@ function buildDateButtons() {
 function fmt(iso) {
   if (!iso) return "--";
   const d = new Date(iso);
-  const mon = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][d.getUTCMonth()];
-  return `${mon} ${d.getUTCDate()}, ${String(d.getUTCHours()).padStart(2,'0')}:${String(d.getUTCMinutes()).padStart(2,'0')}:${String(d.getUTCSeconds()).padStart(2,'0')} UTC`;
+  const s = d.toLocaleString("en-US", {
+    timeZone: "America/Los_Angeles",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+  return `${s} PT`;
 }
 
 // ── Actions ──
 function setRange(key) {
   activeRange = key;
   currentFilter = "all";
-  currentAE = "all";
+  currentAEs = [];
   currentTransition = "all";
   document.querySelectorAll(".date-range button").forEach(b => b.classList.remove("active"));
   document.querySelector(`.date-range button[data-range="${key}"]`).classList.add("active");
@@ -87,8 +95,42 @@ function setRange(key) {
 }
 
 function filterBy(bucket) { currentFilter = bucket; render(); }
-function filterByAE(ae) { currentAE = ae; render(); }
 function filterByTransition(t) { currentTransition = t; render(); }
+
+// ── AE multi-select ──
+function toggleAEPanel(e) {
+  if (e) e.stopPropagation();
+  const panel = document.getElementById("aeMultiPanel");
+  const btn = document.getElementById("aeMultiBtn");
+  const open = !panel.hidden;
+  panel.hidden = open;
+  btn.classList.toggle("open", !open);
+}
+
+function closeAEPanel() {
+  const panel = document.getElementById("aeMultiPanel");
+  const btn = document.getElementById("aeMultiBtn");
+  if (panel && !panel.hidden) {
+    panel.hidden = true;
+    btn.classList.remove("open");
+  }
+}
+
+function toggleAE(ae) {
+  const i = currentAEs.indexOf(ae);
+  if (i >= 0) currentAEs.splice(i, 1);
+  else currentAEs.push(ae);
+  render();
+}
+
+function clearAEs() {
+  currentAEs = [];
+  render();
+}
+
+document.addEventListener("click", (e) => {
+  if (!e.target.closest(".multi-select")) closeAEPanel();
+});
 
 function sortAETable(col) {
   if (aeSortCol === col) aeSortAsc = !aeSortAsc;
@@ -141,15 +183,27 @@ function render() {
   transSel.innerHTML = '<option value="all">All</option>' +
     transitions.map(t => `<option value="${t}"${t === currentTransition ? ' selected' : ''}>${t}</option>`).join("");
 
-  // Populate AE dropdown
-  const sel = document.getElementById("aeFilter");
+  // Populate AE multi-select panel
   const aes = [...new Set(processed.map(r => r.ae))].sort();
-  sel.innerHTML = '<option value="all">All AEs</option>' +
-    aes.map(ae => `<option value="${ae}"${ae === currentAE ? ' selected' : ''}>${ae}</option>`).join("");
+  // Prune stale selections (AEs no longer in this range)
+  currentAEs = currentAEs.filter(ae => aes.includes(ae));
+  const panel = document.getElementById("aeMultiPanel");
+  const btn = document.getElementById("aeMultiBtn");
+  panel.innerHTML =
+    `<label><input type="checkbox" ${currentAEs.length === 0 ? "checked" : ""} onclick="event.stopPropagation(); clearAEs();"> All AEs</label>` +
+    `<div class="divider"></div>` +
+    aes.map(ae => {
+      const checked = currentAEs.includes(ae) ? "checked" : "";
+      const safe = ae.replace(/'/g, "\\'");
+      return `<label><input type="checkbox" ${checked} onclick="event.stopPropagation(); toggleAE('${safe}');"> ${ae}</label>`;
+    }).join("");
+  btn.textContent = currentAEs.length === 0 ? "All AEs"
+    : currentAEs.length === 1 ? currentAEs[0]
+    : `${currentAEs.length} AEs`;
 
   // Apply filters
   const transProcessed = currentTransition === "all" ? processed : processed.filter(r => (r.transition || "Active Scenario") === currentTransition);
-  const aeProcessed = currentAE === "all" ? transProcessed : transProcessed.filter(r => r.ae === currentAE);
+  const aeProcessed = currentAEs.length === 0 ? transProcessed : transProcessed.filter(r => currentAEs.includes(r.ae));
   const filtered = currentFilter === "all" ? aeProcessed : aeProcessed.filter(r => r.bucket === currentFilter);
 
   const within = aeProcessed.filter(r => r.bucket === "within").length;
@@ -172,11 +226,11 @@ function render() {
   const aeSource = currentTransition === "all" ? processed : processed.filter(r => (r.transition || "Active Scenario") === currentTransition);
   const aeMap = {};
   aeSource.forEach(r => {
-    if (!aeMap[r.ae]) aeMap[r.ae] = { ae: r.ae, total: 0, within: 0, after: 0, never: 0, pending: 0, callMins: [] };
+    if (!aeMap[r.ae]) aeMap[r.ae] = { ae: r.ae, total: 0, within: 0, after: 0, never: 0, pending: 0 };
     const a = aeMap[r.ae];
     a.total++;
-    if (r.bucket === "within") { a.within++; a.callMins.push(r.minsToCall); }
-    else if (r.bucket === "after") { a.after++; a.callMins.push(r.minsToCall); }
+    if (r.bucket === "within") a.within++;
+    else if (r.bucket === "after") a.after++;
     else if (r.bucket === "never") a.never++;
     else if (r.bucket === "pending") a.pending++;
   });
@@ -184,10 +238,7 @@ function render() {
   const aeRows = Object.values(aeMap).map(a => {
     const elig = a.within + a.after + a.never;
     const callRate = elig ? Math.round((a.within + a.after) / elig * 100) : null;
-    const avgMins = a.callMins.length
-      ? Math.round(a.callMins.reduce((s,v) => s+v, 0) / a.callMins.length * 10) / 10
-      : null;
-    return { ...a, eligible: elig, callRate, avgMins };
+    return { ...a, eligible: elig, callRate };
   });
 
   aeRows.sort((a, b) => {
@@ -200,7 +251,6 @@ function render() {
       case 4: va = a.never; vb = b.never; break;
       case 5: va = a.pending; vb = b.pending; break;
       case 6: va = a.callRate ?? -1; vb = b.callRate ?? -1; break;
-      case 7: va = a.avgMins ?? 99999; vb = b.avgMins ?? 99999; break;
     }
     return typeof va === "string"
       ? (aeSortAsc ? va.localeCompare(vb) : vb.localeCompare(va))
@@ -217,7 +267,6 @@ function render() {
       <td>${a.never}</td>
       <td>${a.pending}</td>
       <td class="${rateClass}">${a.callRate !== null ? a.callRate + "%" : "--"}</td>
-      <td>${a.avgMins !== null ? a.avgMins + " min" : "--"}</td>
     </tr>`;
   }).join("");
 

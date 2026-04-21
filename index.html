@@ -50,13 +50,12 @@
       <th onclick="sortAETable(4)">Never Called <span class="ae-arrow"></span></th>
       <th onclick="sortAETable(5)">Pending <span class="ae-arrow"></span></th>
       <th onclick="sortAETable(6)">Call Rate <span class="ae-arrow"></span></th>
-      <th onclick="sortAETable(7)">Avg Mins <span class="ae-arrow"></span></th>
     </tr>
   </thead>
   <tbody id="aeTableBody"></tbody>
 </table>
 
-<h2 class="section-title" style="margin-top:32px;">Lead Detail</h2>
+<h2 class="section-title" style="margin-top:32px;">Opportunity Detail</h2>
 <div class="filter-row">
   <div class="filters" id="bucketFilters">
     <button data-bucket="all" class="active" onclick="filterBy('all')">All</button>
@@ -72,10 +71,11 @@
     </select>
   </div>
   <div class="ae-filter">
-    <label for="aeFilter">AE:</label>
-    <select id="aeFilter" onchange="filterByAE(this.value)">
-      <option value="all">All AEs</option>
-    </select>
+    <label>AE:</label>
+    <div class="multi-select">
+      <button type="button" class="multi-btn" id="aeMultiBtn" onclick="toggleAEPanel(event)">All AEs</button>
+      <div class="multi-panel" id="aeMultiPanel" hidden></div>
+    </div>
   </div>
 </div>
 
@@ -85,8 +85,8 @@
       <th onclick="sortTable(0)">Contact <span class="arrow"></span></th>
       <th onclick="sortTable(1)">AE <span class="arrow"></span></th>
       <th onclick="sortTable(2)">Transition <span class="arrow"></span></th>
-      <th onclick="sortTable(3)">Status Changed (UTC) <span class="arrow"></span></th>
-      <th onclick="sortTable(4)">First Call (UTC) <span class="arrow"></span></th>
+      <th onclick="sortTable(3)">Status Changed (PT) <span class="arrow"></span></th>
+      <th onclick="sortTable(4)">First Call (PT) <span class="arrow"></span></th>
       <th onclick="sortTable(5)">Mins to Call <span class="arrow">▲</span></th>
       <th onclick="sortTable(6)">Bucket <span class="arrow"></span></th>
       <th>Close</th>
