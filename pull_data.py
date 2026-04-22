@@ -258,6 +258,7 @@ def classify(changed_at_str, call_at_str, pre_call_at_str, now):
 def main():
     parser = argparse.ArgumentParser(description="Pull Speed-to-Call data from Close CRM")
     parser.add_argument("--days", type=int, help="Pull last N days of data")
+    parser.add_argument("--mtd", action="store_true", help="Pull from the 1st of the current PT month through now")
     parser.add_argument("--start", type=str, help="Start date (YYYY-MM-DD)")
     parser.add_argument("--end", type=str, help="End date (YYYY-MM-DD)")
     args = parser.parse_args()
@@ -266,7 +267,11 @@ def main():
     now = datetime.now(timezone.utc)
     pt_now = now.astimezone(PT)
 
-    if args.days:
+    if args.mtd:
+        end_date = pt_now.strftime("%Y-%m-%d")
+        start_date = pt_now.replace(day=1).strftime("%Y-%m-%d")
+        api_end = now.isoformat()
+    elif args.days:
         end_date = pt_now.strftime("%Y-%m-%d")
         start_date = (pt_now - timedelta(days=args.days)).strftime("%Y-%m-%d")
         api_end = now.isoformat()
@@ -275,7 +280,7 @@ def main():
         end_date = args.end
         api_end = f"{args.end}T23:59:59+00:00"
     else:
-        print("Specify --days N or --start/--end dates")
+        print("Specify --mtd, --days N, or --start/--end dates")
         sys.exit(1)
 
     # Step 1: Get RTR → Active Scenario transitions.

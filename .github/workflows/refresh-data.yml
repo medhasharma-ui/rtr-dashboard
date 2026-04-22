@@ -14,7 +14,7 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install -r requirements.txt
-      - run: python pull_data.py --days 7
+      - run: python pull_data.py --mtd
         env:
           CLOSE_API_KEY: ${{ secrets.CLOSE_API_KEY }}
           SUPABASE_URL: https://ercbzutulfrerwmkndhy.supabase.co

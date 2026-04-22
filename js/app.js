@@ -40,24 +40,44 @@ function ptDateKey(date) {
   return date.toLocaleDateString("en-CA", { timeZone: "America/Los_Angeles" });
 }
 
+// Compute MTD/WTD/last-7-days start keys in PT
+function rangeBoundaries() {
+  const today = ptDateKey(new Date());
+  const [ty, tm, td] = today.split("-").map(Number);
+  const mtdStart = `${ty}-${String(tm).padStart(2, "0")}-01`;
+  const todayUTC = new Date(Date.UTC(ty, tm - 1, td));
+  const daysFromMonday = (todayUTC.getUTCDay() + 6) % 7;  // Mon=0 … Sun=6
+  const wtdStart = new Date(Date.UTC(ty, tm - 1, td - daysFromMonday)).toISOString().slice(0, 10);
+  const sevenDaysAgo = new Date(Date.UTC(ty, tm - 1, td - 7)).toISOString().slice(0, 10);
+  return { today, mtdStart, wtdStart, sevenDaysAgo };
+}
+
+function countSince(startKey) {
+  return Object.entries(dashData.by_date)
+    .filter(([d]) => d >= startKey)
+    .reduce((s, [, leads]) => s + leads.length, 0);
+}
+
 function buildDateButtons() {
   const container = document.getElementById("dateRange");
-  const today = ptDateKey(new Date());
+  const { today, mtdStart, wtdStart, sevenDaysAgo } = rangeBoundaries();
   const yesterday = ptDateKey(new Date(Date.now() - 86400000));
   const dates = Object.keys(dashData.by_date).sort();
 
   let html = `<button data-range="all" class="active" onclick="setRange('all')">All <span class="count-badge">${dashData.all.length}</span></button>`;
+  html += `<button data-range="mtd" onclick="setRange('mtd')">MTD <span class="count-badge">${countSince(mtdStart)}</span></button>`;
+  html += `<button data-range="wtd" onclick="setRange('wtd')">WTD <span class="count-badge">${countSince(wtdStart)}</span></button>`;
 
-  // Older dates (excluding today/yesterday — those are pinned at the end)
+  // Individual date tabs limited to the last 7 days (older data still reachable via MTD/All)
   for (const date of dates) {
     if (date === today || date === yesterday) continue;
+    if (date < sevenDaysAgo) continue;
     const count = dashData.by_date[date].length;
     const d = new Date(date + "T12:00:00Z");
     const label = d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
     html += `<button data-range="${date}" onclick="setRange('${date}')">${label} <span class="count-badge">${count}</span></button>`;
   }
 
-  // Always show Yesterday then Today at the end (count = 0 if no data)
   const yesterdayCount = (dashData.by_date[yesterday] || []).length;
   html += `<button data-range="${yesterday}" onclick="setRange('${yesterday}')">Yesterday <span class="count-badge">${yesterdayCount}</span></button>`;
 
@@ -153,15 +173,28 @@ function render() {
   if (!dashData) return;
 
   const now = new Date(dashData.generated_at);
-  const rawData = activeRange === "all"
-    ? dashData.all
-    : (dashData.by_date[activeRange] || []);
+  const { mtdStart, wtdStart } = rangeBoundaries();
+
+  let rawData;
+  if (activeRange === "all") {
+    rawData = dashData.all;
+  } else if (activeRange === "mtd" || activeRange === "wtd") {
+    const startKey = activeRange === "mtd" ? mtdStart : wtdStart;
+    rawData = [];
+    for (const [date, leads] of Object.entries(dashData.by_date)) {
+      if (date >= startKey) rawData.push(...leads);
+    }
+  } else {
+    rawData = dashData.by_date[activeRange] || [];
+  }
 
   const processed = rawData.map(r => ({ ...r }));
 
   // Range info
   const rangeInfo = activeRange === "all"
     ? `${dashData.start_date} to ${dashData.end_date} | ${processed.length} leads`
+    : activeRange === "mtd" ? `MTD (${mtdStart} →) | ${processed.length} leads`
+    : activeRange === "wtd" ? `WTD (${wtdStart} →) | ${processed.length} leads`
     : `${activeRange} | ${processed.length} leads`;
   document.getElementById("rangeInfo").textContent = rangeInfo;
 
