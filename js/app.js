@@ -14,20 +14,54 @@ let aeSortCol = 7;
 let aeSortAsc = true;
 
 // ── Load data ──
+// Two snapshot types live in the same table: the daily MTD pull and the
+// every-6h recent (today+yesterday) pull. Fetch the latest of each and
+// overlay recent's today/yesterday on top of the MTD base.
 async function loadData() {
   try {
     const resp = await fetch(
-      `${SUPABASE_URL}/rest/v1/dashboard_snapshots?select=data,generated_at&order=generated_at.desc&limit=1`,
+      `${SUPABASE_URL}/rest/v1/dashboard_snapshots?select=data,generated_at&order=generated_at.desc&limit=10`,
       { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` } }
     );
     if (!resp.ok) throw new Error("Supabase fetch failed: " + resp.status);
     const rows = await resp.json();
     if (!rows.length) throw new Error("No snapshots found");
-    dashData = rows[0].data;
+
+    let fullRow = null, recentRow = null;
+    for (const row of rows) {
+      const type = row.data.range_type || "mtd";  // legacy untagged = mtd
+      if ((type === "mtd" || type === "custom") && !fullRow) fullRow = row;
+      else if (type === "recent" && !recentRow) recentRow = row;
+      if (fullRow && recentRow) break;
+    }
+    if (!fullRow) throw new Error("No MTD snapshot found");
+
+    const full = fullRow.data;
+    const recent = recentRow?.data;
+    const useRecent = recent && recent.generated_at > full.generated_at;
+
+    if (useRecent) {
+      const today = ptDateKey(new Date());
+      const yesterday = ptDateKey(new Date(Date.now() - 86400000));
+      const merged = { ...full.by_date };
+      delete merged[today];
+      delete merged[yesterday];
+      if (recent.by_date[today]) merged[today] = recent.by_date[today];
+      if (recent.by_date[yesterday]) merged[yesterday] = recent.by_date[yesterday];
+      const mergedAll = Object.values(merged).flat();
+      dashData = { ...full, by_date: merged, all: mergedAll };
+    } else {
+      dashData = full;
+    }
+
     buildDateButtons();
     render();
-    document.getElementById("meta").textContent =
-      `Data pulled: ${new Date(dashData.generated_at).toLocaleString()} | Range: ${dashData.start_date} to ${dashData.end_date}`;
+
+    const mtdPulled = new Date(full.generated_at).toLocaleString();
+    const recentPulled = useRecent ? new Date(recent.generated_at).toLocaleString() : null;
+    document.getElementById("meta").textContent = recentPulled
+      ? `MTD pulled: ${mtdPulled} | Today/Yesterday pulled: ${recentPulled} | Range: ${full.start_date} → ${full.end_date}`
+      : `Data pulled: ${mtdPulled} | Range: ${full.start_date} → ${full.end_date}`;
   } catch (e) {
     document.getElementById("tableBody").innerHTML =
       `<tr><td colspan="8" class="loading">Could not load data: ${e.message}</td></tr>`;

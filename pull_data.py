@@ -259,6 +259,7 @@ def main():
     parser = argparse.ArgumentParser(description="Pull Speed-to-Call data from Close CRM")
     parser.add_argument("--days", type=int, help="Pull last N days of data")
     parser.add_argument("--mtd", action="store_true", help="Pull from the 1st of the current PT month through now")
+    parser.add_argument("--recent", action="store_true", help="Pull today + yesterday (PT) only")
     parser.add_argument("--start", type=str, help="Start date (YYYY-MM-DD)")
     parser.add_argument("--end", type=str, help="End date (YYYY-MM-DD)")
     args = parser.parse_args()
@@ -268,19 +269,27 @@ def main():
     pt_now = now.astimezone(PT)
 
     if args.mtd:
+        range_type = "mtd"
         end_date = pt_now.strftime("%Y-%m-%d")
         start_date = pt_now.replace(day=1).strftime("%Y-%m-%d")
         api_end = now.isoformat()
+    elif args.recent:
+        range_type = "recent"
+        end_date = pt_now.strftime("%Y-%m-%d")
+        start_date = (pt_now - timedelta(days=1)).strftime("%Y-%m-%d")
+        api_end = now.isoformat()
     elif args.days:
+        range_type = "custom"
         end_date = pt_now.strftime("%Y-%m-%d")
         start_date = (pt_now - timedelta(days=args.days)).strftime("%Y-%m-%d")
         api_end = now.isoformat()
     elif args.start and args.end:
+        range_type = "custom"
         start_date = args.start
         end_date = args.end
         api_end = f"{args.end}T23:59:59+00:00"
     else:
-        print("Specify --mtd, --days N, or --start/--end dates")
+        print("Specify --mtd, --recent, --days N, or --start/--end dates")
         sys.exit(1)
 
     # Step 1: Get RTR → Active Scenario transitions.
@@ -343,6 +352,7 @@ def main():
 
     output = {
         "generated_at": now.isoformat(),
+        "range_type": range_type,
         "start_date": start_date,
         "end_date": end_date,
         "total_leads": len(results),
