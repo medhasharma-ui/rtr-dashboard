@@ -1,7 +1,13 @@
 {
   "buildCommand": "",
   "outputDirectory": ".",
+  "functions": {
+    "api/*.py": { "runtime": "@vercel/python@4.3.1" }
+  },
   "rewrites": [
     { "source": "/(.*)", "destination": "/$1" }
+  ],
+  "crons": [
+    { "path": "/api/cron?reset=1", "schedule": "0 */6 * * *" }
   ]
 }
