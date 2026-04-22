@@ -10,7 +10,7 @@ let currentAEs = [];                  // empty = all AEs
 let currentTransition = "all";
 let sortCol = 5;
 let sortAsc = true;
-let aeSortCol = 6;
+let aeSortCol = 7;
 let aeSortAsc = true;
 
 // ── Load data ──
@@ -233,13 +233,14 @@ function render() {
   const aeSource = currentTransition === "all" ? processed : processed.filter(r => (r.transition || "Active Scenario") === currentTransition);
   const aeMap = {};
   aeSource.forEach(r => {
-    if (!aeMap[r.ae]) aeMap[r.ae] = { ae: r.ae, total: 0, within: 0, after: 0, never: 0, pending: 0 };
+    if (!aeMap[r.ae]) aeMap[r.ae] = { ae: r.ae, total: 0, within: 0, preCall: 0, after: 0, never: 0, pending: 0 };
     const a = aeMap[r.ae];
     a.total++;
     if (r.bucket === "within") a.within++;
     else if (r.bucket === "after") a.after++;
     else if (r.bucket === "never") a.never++;
     else if (r.bucket === "pending") a.pending++;
+    if (r.preCall) a.preCall++;
   });
 
   const aeRows = Object.values(aeMap).map(a => {
@@ -254,10 +255,11 @@ function render() {
       case 0: va = a.ae; vb = b.ae; break;
       case 1: va = a.total; vb = b.total; break;
       case 2: va = a.within; vb = b.within; break;
-      case 3: va = a.after; vb = b.after; break;
-      case 4: va = a.never; vb = b.never; break;
-      case 5: va = a.pending; vb = b.pending; break;
-      case 6: va = a.callRate ?? -1; vb = b.callRate ?? -1; break;
+      case 3: va = a.preCall; vb = b.preCall; break;
+      case 4: va = a.after; vb = b.after; break;
+      case 5: va = a.never; vb = b.never; break;
+      case 6: va = a.pending; vb = b.pending; break;
+      case 7: va = a.callRate ?? -1; vb = b.callRate ?? -1; break;
     }
     return typeof va === "string"
       ? (aeSortAsc ? va.localeCompare(vb) : vb.localeCompare(va))
@@ -270,6 +272,7 @@ function render() {
       <td>${a.ae}</td>
       <td>${a.total}</td>
       <td>${a.within}</td>
+      <td>${a.preCall}</td>
       <td>${a.after}</td>
       <td>${a.never}</td>
       <td>${a.pending}</td>
