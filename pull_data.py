@@ -186,6 +186,39 @@ def fetch_calls_for_lead(api_key, lead_id, after_timestamp):
         return None
 
 
+def fetch_pre_trigger_call(api_key, lead_id, changed_at_str):
+    """
+    Find the earliest *connected* call on a lead in the 30-minute window
+    immediately before the status change.
+    Connected = duration > 0 AND status == "completed" (Close's "answered").
+    """
+    changed_at = datetime.fromisoformat(changed_at_str.replace("Z", "+00:00"))
+    window_start = (changed_at - timedelta(minutes=30)).isoformat()
+    try:
+        data = close_get(
+            "activity/call/",
+            params={
+                "lead_id": lead_id,
+                "date_created__gte": window_start,
+                "date_created__lte": changed_at_str,
+                "_order_by": "date_created",
+                "_limit": 50,
+                "_fields": "date_created,duration,status",
+            },
+            api_key=api_key,
+        )
+        for call in data.get("data", []):
+            ts = call["date_created"]
+            if datetime.fromisoformat(ts.replace("Z", "+00:00")) >= changed_at:
+                continue
+            if call.get("duration", 0) > 0 and call.get("status") == "completed":
+                return ts
+        return None
+    except Exception as e:
+        print(f"  Warning: Could not fetch pre-trigger calls for lead {lead_id}: {e}")
+        return None
+
+
 def fetch_users(api_key):
     """Get user ID → name mapping."""
     data = close_get("user/", api_key=api_key)
@@ -198,18 +231,23 @@ def fetch_users(api_key):
     return users
 
 
-def classify(changed_at_str, call_at_str, now):
+def classify(changed_at_str, call_at_str, pre_call_at_str, now):
     """
     Step 3: Classify the lead into a bucket.
+    A connected call in the 30-min pre-trigger window also counts as "within".
     """
     changed_at = datetime.fromisoformat(changed_at_str.replace("Z", "+00:00"))
     elapsed_mins = (now - changed_at).total_seconds() / 60
+    has_pre = bool(pre_call_at_str)
 
     if call_at_str:
         call_at = datetime.fromisoformat(call_at_str.replace("Z", "+00:00"))
         mins_to_call = (call_at - changed_at).total_seconds() / 60
-        bucket = "within" if mins_to_call <= 120 else "after"
+        bucket = "within" if (has_pre or mins_to_call <= 120) else "after"
         return bucket, round(mins_to_call, 1)
+
+    if has_pre:
+        return "within", None
 
     if elapsed_mins < 120:
         return "pending", None
@@ -270,7 +308,8 @@ def main():
 
         lead_info = fetch_lead_info(api_key, lead_id)
         call_at = fetch_calls_for_lead(api_key, lead_id, changed_at)
-        bucket, mins_to_call = classify(changed_at, call_at, now)
+        pre_call_at = fetch_pre_trigger_call(api_key, lead_id, changed_at)
+        bucket, mins_to_call = classify(changed_at, call_at, pre_call_at, now)
 
         # Resolve AE name
         ae_user_id = lead_info.get("user_id") or t.get("user_id")
@@ -281,6 +320,8 @@ def main():
             "ae": ae_name,
             "changedAt": changed_at,
             "callAt": call_at,
+            "preCallAt": pre_call_at,
+            "preCall": bool(pre_call_at),
             "minsToCall": mins_to_call,
             "bucket": bucket,
             "leadId": lead_id,
@@ -321,9 +362,11 @@ def main():
     after = sum(1 for r in results if r["bucket"] == "after")
     never = sum(1 for r in results if r["bucket"] == "never")
     pending = sum(1 for r in results if r["bucket"] == "pending")
+    pre_call = sum(1 for r in results if r.get("preCall"))
 
     print(f"\nDone! {len(results)} leads processed.")
     print(f"  Within 2 hrs: {within}")
+    print(f"  Pre-call:     {pre_call}")
     print(f"  After 2 hrs:  {after}")
     print(f"  Never called: {never}")
     print(f"  Pending:      {pending}")

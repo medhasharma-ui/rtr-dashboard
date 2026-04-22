@@ -15,7 +15,7 @@ h1 { font-size: 22px; font-weight: 700; margin-bottom: 4px; }
 .range-info { font-size: 12px; color: #636e72; margin-bottom: 20px; }
 
 /* Summary cards */
-.cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 24px; }
+.cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 24px; }
 .card { background: #fff; border-radius: 12px; padding: 20px 24px; box-shadow: 0 1px 3px rgba(0,0,0,.08); text-align: center; cursor: pointer; transition: box-shadow .15s; border: 2px solid transparent; }
 .card:hover { box-shadow: 0 4px 12px rgba(0,0,0,.12); }
 .card.active { border-color: #6c5ce7; }
@@ -23,6 +23,7 @@ h1 { font-size: 22px; font-weight: 700; margin-bottom: 4px; }
 .card .pct { font-size: 14px; color: #636e72; margin-top: 2px; }
 .card .label { font-size: 13px; font-weight: 600; margin-top: 8px; text-transform: uppercase; letter-spacing: .5px; }
 .card.green .count { color: #00b894; }
+.card.teal .count { color: #0abde3; }
 .card.orange .count { color: #fdcb6e; }
 .card.red .count { color: #d63031; }
 
@@ -70,6 +71,7 @@ tbody tr:hover { background: #f8f9ff; }
 .badge.after { background: #fdcb6e30; color: #e17055; }
 .badge.never { background: #d6303120; color: #d63031; }
 .badge.pending { background: #74b9ff30; color: #0984e3; }
+.badge-precall { display: inline-block; margin-left: 6px; padding: 2px 8px; border-radius: 10px; font-size: 10px; font-weight: 600; background: #0abde320; color: #0abde3; letter-spacing: .3px; }
 
 /* Section titles */
 .section-title { font-size: 16px; font-weight: 700; margin: 24px 0 12px; color: #2d3436; }

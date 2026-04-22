@@ -167,9 +167,11 @@ function render() {
 
   if (!processed.length) {
     document.getElementById("withinCount").textContent = "--";
+    document.getElementById("precallCount").textContent = "--";
     document.getElementById("afterCount").textContent = "--";
     document.getElementById("neverCount").textContent = "--";
     document.getElementById("withinPct").textContent = "";
+    document.getElementById("precallPct").textContent = "";
     document.getElementById("afterPct").textContent = "";
     document.getElementById("neverPct").textContent = "";
     document.getElementById("tableBody").innerHTML =
@@ -204,18 +206,23 @@ function render() {
   // Apply filters
   const transProcessed = currentTransition === "all" ? processed : processed.filter(r => (r.transition || "Active Scenario") === currentTransition);
   const aeProcessed = currentAEs.length === 0 ? transProcessed : transProcessed.filter(r => currentAEs.includes(r.ae));
-  const filtered = currentFilter === "all" ? aeProcessed : aeProcessed.filter(r => r.bucket === currentFilter);
+  const filtered = currentFilter === "all" ? aeProcessed
+    : currentFilter === "precall" ? aeProcessed.filter(r => r.preCall)
+    : aeProcessed.filter(r => r.bucket === currentFilter);
 
   const within = aeProcessed.filter(r => r.bucket === "within").length;
   const after  = aeProcessed.filter(r => r.bucket === "after").length;
   const never  = aeProcessed.filter(r => r.bucket === "never").length;
   const pending = aeProcessed.filter(r => r.bucket === "pending").length;
+  const preCall = aeProcessed.filter(r => r.preCall).length;
   const eligible = within + after + never;
 
   document.getElementById("withinCount").textContent = within;
+  document.getElementById("precallCount").textContent = preCall;
   document.getElementById("afterCount").textContent = after;
   document.getElementById("neverCount").textContent = never;
   document.getElementById("withinPct").textContent = eligible ? Math.round(within/eligible*100) + "% of eligible" : "";
+  document.getElementById("precallPct").textContent = within ? Math.round(preCall/within*100) + "% of within" : "";
   document.getElementById("afterPct").textContent = eligible ? Math.round(after/eligible*100) + "% of eligible" : "";
   document.getElementById("neverPct").textContent = eligible
     ? Math.round(never/eligible*100) + "% of eligible" + (pending ? "  |  " + pending + " pending" : "")
@@ -308,6 +315,9 @@ function render() {
     const link = r.leadId
       ? `<a href="https://app.close.com/lead/${r.leadId}/" target="_blank" style="color:#6c5ce7;font-weight:700;text-decoration:none;font-size:15px;" title="Open in Close">&#8599;</a>`
       : `<span style="color:#b2bec3">&#8212;</span>`;
+    const preBadge = r.preCall
+      ? `<span class="badge-precall" title="Connected call within 30 min before status change">Pre-call</span>`
+      : "";
     return `<tr>
       <td><strong>${r.contact}</strong></td>
       <td>${r.ae}</td>
@@ -315,7 +325,7 @@ function render() {
       <td>${fmt(r.changedAt)}</td>
       <td>${fmt(r.callAt)}</td>
       <td>${r.minsToCall !== null ? r.minsToCall + " min" : "--"}</td>
-      <td><span class="badge ${r.bucket}">${bl}</span></td>
+      <td><span class="badge ${r.bucket}">${bl}</span>${preBadge}</td>
       <td style="text-align:center">${link}</td>
     </tr>`;
   }).join("");
