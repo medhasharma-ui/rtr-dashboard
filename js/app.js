@@ -253,12 +253,12 @@ function render() {
     let va, vb;
     switch (aeSortCol) {
       case 0: va = a.ae; vb = b.ae; break;
-      case 1: va = a.total; vb = b.total; break;
+      case 1: va = a.preCall; vb = b.preCall; break;
       case 2: va = a.within; vb = b.within; break;
-      case 3: va = a.preCall; vb = b.preCall; break;
-      case 4: va = a.after; vb = b.after; break;
-      case 5: va = a.never; vb = b.never; break;
-      case 6: va = a.pending; vb = b.pending; break;
+      case 3: va = a.after; vb = b.after; break;
+      case 4: va = a.never; vb = b.never; break;
+      case 5: va = a.pending; vb = b.pending; break;
+      case 6: va = a.total; vb = b.total; break;
       case 7: va = a.callRate ?? -1; vb = b.callRate ?? -1; break;
     }
     return typeof va === "string"
@@ -270,12 +270,12 @@ function render() {
     const rateClass = a.callRate === null ? "" : a.callRate >= 50 ? "call-rate-good" : a.callRate >= 25 ? "call-rate-mid" : "call-rate-bad";
     return `<tr>
       <td>${a.ae}</td>
-      <td>${a.total}</td>
-      <td>${a.within}</td>
       <td>${a.preCall}</td>
+      <td>${a.within}</td>
       <td>${a.after}</td>
       <td>${a.never}</td>
       <td>${a.pending}</td>
+      <td>${a.total}</td>
       <td class="${rateClass}">${a.callRate !== null ? a.callRate + "%" : "--"}</td>
     </tr>`;
   }).join("");
