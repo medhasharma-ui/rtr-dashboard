@@ -1,7 +1,3 @@
-// ── Config ──
-const SUPABASE_URL = "https://ercbzutulfrerwmkndhy.supabase.co";
-const SUPABASE_ANON_KEY = "sb_publishable_tlU-oHKcVblfTHjc_YF7sw_hW4lubGo";
-
 // ── State ──
 let dashData = null;
 let activeRange = "all";
@@ -16,14 +12,10 @@ let aeSortAsc = true;
 // ── Load data ──
 async function loadData() {
   try {
-    const resp = await fetch(
-      `${SUPABASE_URL}/rest/v1/dashboard_snapshots?select=data,generated_at&order=generated_at.desc&limit=1`,
-      { headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` } }
-    );
-    if (!resp.ok) throw new Error("Supabase fetch failed: " + resp.status);
-    const rows = await resp.json();
-    if (!rows.length) throw new Error("No snapshots found");
-    dashData = rows[0].data;
+    const resp = await fetch("/api/snapshot");
+    if (!resp.ok) throw new Error("Snapshot fetch failed: " + resp.status);
+    dashData = await resp.json();
+    if (dashData.error) throw new Error(dashData.error);
     buildDateButtons();
     render();
     document.getElementById("meta").textContent =
