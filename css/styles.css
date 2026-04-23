@@ -4,6 +4,25 @@ h1 { font-size: 22px; font-weight: 700; margin-bottom: 4px; }
 .subtitle { color: #636e72; font-size: 14px; margin-bottom: 16px; }
 .meta { font-size: 11px; color: #b2bec3; margin-bottom: 20px; }
 
+/* Tabs row (date range + definitions button) */
+.tabs-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 20px; }
+.tabs-row .date-range { margin-bottom: 0; flex: 1; }
+.defn-tab-btn { padding: 8px 18px; border-radius: 8px; border: 2px solid #6c5ce7; background: #fff; color: #6c5ce7; font-size: 13px; font-weight: 600; cursor: pointer; white-space: nowrap; transition: all .15s; }
+.defn-tab-btn:hover { background: #6c5ce7; color: #fff; }
+
+/* Definitions modal */
+.defn-modal { position: fixed; inset: 0; background: rgba(45,52,54,.55); z-index: 1000; display: flex; align-items: center; justify-content: center; padding: 24px; }
+.defn-modal[hidden] { display: none; }
+.defn-modal-content { background: #fff; border-radius: 14px; padding: 32px 36px; max-width: 720px; width: 100%; max-height: 88vh; overflow-y: auto; position: relative; box-shadow: 0 10px 40px rgba(0,0,0,.2); }
+.defn-close { position: absolute; top: 12px; right: 16px; background: none; border: none; font-size: 28px; line-height: 1; cursor: pointer; color: #636e72; padding: 4px 10px; }
+.defn-close:hover { color: #2d3436; }
+.defn-modal-content h2 { margin: 0 0 8px; font-size: 20px; }
+.defn-modal-content h3 { margin: 22px 0 8px; font-size: 14px; text-transform: uppercase; letter-spacing: .5px; color: #6c5ce7; }
+.defn-modal-content p { font-size: 14px; line-height: 1.55; margin-bottom: 8px; color: #2d3436; }
+.defn-modal-content ul { padding-left: 22px; margin-bottom: 8px; }
+.defn-modal-content li { font-size: 14px; line-height: 1.55; margin-bottom: 6px; color: #2d3436; }
+.defn-modal-content .defn-note { font-size: 12px; color: #636e72; font-style: italic; }
+
 /* Date range buttons */
 .date-range { display: flex; gap: 8px; margin-bottom: 20px; flex-wrap: wrap; }
 .date-range button { padding: 8px 20px; border-radius: 8px; border: 2px solid #dfe6e9; background: #fff; font-size: 13px; font-weight: 600; cursor: pointer; transition: all .15s; }
