@@ -30,27 +30,34 @@ A sales ops dashboard tracking whether AEs called a lead within 2 hours of an op
 | Pending | Status changed < 2 hrs ago — still within SLA window |
 
 ## Architecture
-- `pull_data.py` runs on a GitHub Actions cron (every 6 hours). It fetches from Close CRM and inserts a snapshot row into Supabase (`dashboard_snapshots` table, JSONB column).
-- The frontend is a static site (HTML + vanilla JS) deployed to Vercel. It fetches the latest snapshot directly from Supabase via PostgREST using the public publishable key.
-- No server, no long-running process. Read with publishable key (RLS-restricted to SELECT). Write with secret key (CI only).
+- **Data pull (two paths):**
+  - **GitHub Actions** (primary): `pull_data.py --days 7` runs every 6 hours as a one-shot cron job.
+  - **Vercel serverless** (batched): `/api/cron` state machine, driven by cron-job.org, for environments with execution time limits.
+- Both paths write snapshots to Supabase (`dashboard_snapshots` table, JSONB column).
+- The frontend is a static site (HTML + vanilla JS) deployed to Vercel. It fetches the latest snapshot via `/api/snapshot` (a server-side Supabase read). No Supabase keys are embedded in the frontend.
 
 ## Project Structure
 ```
 pull_data.py                       — fetches from Close, inserts snapshot into Supabase
 requirements.txt                   — Python deps (requests, supabase, python-dotenv)
-.github/workflows/refresh-data.yml — cron schedule for pull_data.py
+.github/workflows/refresh-data.yml — GitHub Actions cron (every 6 hours)
+api/cron.py                        — Vercel serverless batch processor (state machine)
+api/snapshot.py                    — returns latest snapshot JSON (server-side Supabase read)
+api/status.py                      — returns current cron phase + progress
 index.html                         — main dashboard page
 css/styles.css                     — all styling
-js/app.js                          — reads snapshot from Supabase, renders dashboard
-vercel.json                        — Vercel static deploy config
+js/app.js                          — reads snapshot via /api/snapshot, renders dashboard
+setup.sql                          — Supabase table DDL (dashboard_snapshots + cron_state)
+run_cron.sh                        — bash script to run cron loop locally
+vercel.json                        — Vercel config (Python runtime, rewrites)
 CLAUDE.md                          — this file
 ```
 
 ## Supabase
 - Project URL: `https://ercbzutulfrerwmkndhy.supabase.co`
-- Table: `dashboard_snapshots(id uuid, generated_at timestamptz, data jsonb)`
-- RLS: `select` allowed for anon/publishable key; writes require secret key.
-- Frontend embeds the publishable key (safe). Secret key lives only in GitHub Secrets.
+- Tables: `dashboard_snapshots(id uuid, generated_at timestamptz, data jsonb)`, `cron_state` (single-row state machine)
+- RLS: writes require secret key. Frontend reads go through `/api/snapshot` (server-side, uses secret key).
+- Secret key lives in GitHub Secrets and Vercel env vars.
 
 ## Local data pull
 ```

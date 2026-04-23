@@ -9,42 +9,60 @@ Speed-to-Call Dashboard for FlyHomes. Tracks whether AEs called a lead within 2 
 ## Architecture
 
 ```
-                          every 6 hrs (cron-job.org)
-                                  |
-                                  v
-                      +-----------------------+
-                      |   /api/cron?reset=1   |  Vercel Serverless (Python)
-                      +-----------+-----------+
-                                  |
-              every minute  <-----+-----> /api/status
-              (cron-job.org)      |
-                                  v
-                      +-----------------------+
-                      |      /api/cron        |  processes next step
-                      +-----------+-----------+
-                           |             |
-              Close CRM API|             | Supabase
-              (read leads, |             | (read/write cron_state,
-               calls, etc) |             |  write dashboard_snapshots)
-                           v             v
-                    +-----------+  +---------------+
-                    | Close CRM |  |   Supabase    |
-                    +-----------+  +-------+-------+
-                                           |
-                                           | PostgREST (public key, read-only)
-                                           v
-                                   +---------------+
-                                   |  Browser UI   |
-                                   | index.html    |
-                                   | js/app.js     |
-                                   +---------------+
+  Path A: GitHub Actions (primary)           Path B: Vercel Serverless (batched)
+  ──────────────────────────────             ────────────────────────────────────
+  every 6 hrs (GitHub Actions cron)          every 6 hrs (cron-job.org)
+                |                                        |
+                v                                        v
+     +──────────────────+                   +-----------------------+
+     | pull_data.py     |                   |   /api/cron?reset=1   |
+     | (full one-shot)  |                   +-----------+-----------+
+     +────────+─────────+                               |
+              |                         every minute <--+---> /api/status
+              |                         (cron-job.org)  |
+              |                                         v
+              |                            +-----------------------+
+              |                            |      /api/cron        |
+              |                            |   (state machine)     |
+              |                            +-----------+-----------+
+              |                                 |             |
+              |                    Close CRM API|             |
+              |                    (read leads, |             |
+              |                     calls, etc) |             |
+              v                                 v             v
+       +-----------+                     +-----------+  +----------+
+       | Close CRM |                     | Close CRM |  | Supabase |
+       +-----------+                     +-----------+  +----+-----+
+              |                                              |
+              |   Supabase (write dashboard_snapshots)       |
+              +──────────────>───────────────────────────>────+
+                                                             |
+                                                     +──────+──────+
+                                                     | /api/snapshot|
+                                                     | (server-side|
+                                                     |  read)      |
+                                                     +──────+──────+
+                                                            |
+                                                            v
+                                                    +───────────────+
+                                                    |  Browser UI   |
+                                                    | index.html    |
+                                                    | js/app.js     |
+                                                    +───────────────+
 ```
 
 **Components:**
-- **Vercel** - Hosts static frontend + Python serverless functions
-- **Supabase** - PostgreSQL database (snapshots + cron state)
-- **Close CRM** - Source of truth for leads, opportunities, calls
-- **cron-job.org** - External scheduler (Vercel Hobby limits crons to 1/day)
+- **Vercel** — Hosts static frontend + Python serverless functions (`/api/cron`, `/api/status`, `/api/snapshot`)
+- **Supabase** — PostgreSQL database (snapshots + cron state)
+- **Close CRM** — Source of truth for leads, opportunities, calls
+- **GitHub Actions** — Runs `pull_data.py --days 7` every 6 hours (primary data refresh)
+- **cron-job.org** — External scheduler for the Vercel batched pipeline (alternative to GitHub Actions)
+
+**Two data-pull paths:**
+- **Path A (GitHub Actions):** Runs `pull_data.py` as a one-shot CLI job. Simpler, no state management needed. This is the primary active pipeline.
+- **Path B (Vercel serverless):** Breaks the pull into batched steps via `/api/cron` state machine. Needed when execution time limits apply (Vercel Hobby = 10s per invocation). Requires cron-job.org to drive the loop.
+
+Both paths write to the same `dashboard_snapshots` table. The frontend reads via `/api/snapshot`.
 
 ---
 
@@ -54,19 +72,20 @@ Speed-to-Call Dashboard for FlyHomes. Tracks whether AEs called a lead within 2 
 rtr-dashboard/
 |-- index.html                     Main dashboard page
 |-- css/styles.css                 All styling
-|-- js/app.js                      Reads snapshot from Supabase, renders UI
+|-- js/app.js                      Reads snapshot via /api/snapshot, renders UI
 |
 |-- pull_data.py                   Core data pipeline (shared by CLI + serverless)
 |-- api/
 |   |-- cron.py                    Serverless batch processor (state machine)
+|   |-- snapshot.py                Returns latest snapshot JSON (server-side Supabase read)
 |   +-- status.py                  Returns current cron phase + progress
 |
-|-- setup.sql                      Supabase table DDL (cron_state)
+|-- setup.sql                      Supabase table DDL (dashboard_snapshots + cron_state)
 |-- run_cron.sh                    Bash script to run cron loop locally
 |-- requirements.txt               Python deps: requests, python-dotenv, supabase
-|-- vercel.json                    Vercel config (Python runtime, cron, rewrites)
+|-- vercel.json                    Vercel config (Python runtime, rewrites)
 |-- .github/workflows/
-|   +-- refresh-data.yml           GitHub Actions cron (legacy, replaced by Vercel)
+|   +-- refresh-data.yml           GitHub Actions cron (every 6 hours, runs pull_data.py)
 +-- .env.example                   Env var template
 ```
 
@@ -207,6 +226,7 @@ Every phase is designed so that if Vercel kills the function mid-execution, the 
 | `/api/cron?reset=1` | GET | Force-reset and start a fresh run |
 | `/api/cron?dry=1` | GET | Dry-run mode (no snapshot insert) |
 | `/api/cron?reset=1&dry=1` | GET | Fresh dry run |
+| `/api/snapshot` | GET | Returns latest snapshot data JSON (used by frontend) |
 | `/api/status` | GET | Current phase, cursor, total, timestamps |
 
 ### Dry Run
@@ -304,13 +324,21 @@ The minute-cron keeps hitting `/api/cron` which processes one step each time. On
 
 ## Frontend (`js/app.js`)
 
-- Connects to Supabase using the **publishable (anon) key** (safe to embed)
-- Fetches the latest row from `dashboard_snapshots` ordered by `generated_at DESC`
+- Fetches the latest snapshot via **`/api/snapshot`** (server-side Supabase read)
+- No Supabase keys are embedded in the frontend — the serverless function uses the secret key
 - Renders four classification cards with counts and percentages
 - Date tabs: Today, Yesterday, and one tab per date in the snapshot
 - AE multi-select filter
+- Transition type filter (Active Scenario, Declined, Addl Info Needed)
 - Timestamps displayed in Pacific Time
 - All rendering is client-side, no build step
+
+### `/api/snapshot.py`
+
+Lightweight Vercel serverless function that:
+1. Connects to Supabase using `SUPABASE_SECRET_KEY`
+2. Queries `dashboard_snapshots` ordered by `generated_at DESC`, limit 1
+3. Returns the `data` JSONB column as the response body
 
 ---
 
