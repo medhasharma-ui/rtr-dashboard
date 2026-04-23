@@ -23,7 +23,7 @@ while true; do
     break
   fi
 
-  echo "Phase: $phase — processing next batch..."
+  echo "Phase: $phase — processing next step..."
   curl -s "${BASE_URL}/api/cron?${DRY_RUN}" | python3 -m json.tool
   sleep 1
 done

@@ -4,7 +4,7 @@ Vercel serverless function — returns current cron run status.
 GET /api/status
 
 Response:
-  { "phase": "idle|processing|complete",
+  { "phase": "idle|init_leads|init_calls|processing|complete",
     "cursor": 50,
     "total": 120,
     "start_date": "2026-04-14",

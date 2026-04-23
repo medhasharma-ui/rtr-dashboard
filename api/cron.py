@@ -1,12 +1,14 @@
 """
 Vercel serverless function — batch-processes Close CRM data.
 
-Each call processes one batch of leads (default 100), picking up where the
-last call left off.  An external caller loops until /api/status reports
-phase="complete", then stops until the next 6-hour cycle.
+Each call processes one small step, picking up where the last call left off.
+An external caller loops until /api/status reports phase="complete".
+
+Phase state machine:
+  idle → init_leads → init_calls → processing → complete
 
 Endpoints:
-  GET /api/cron          — process next batch (or start new run if idle)
+  GET /api/cron          — process next step (or start new run if idle)
   GET /api/cron?reset=1  — force-reset state and start a fresh run
   GET /api/cron?dry=1    — dry-run mode: skips snapshot insert, returns data in response
 
@@ -31,18 +33,20 @@ from supabase import create_client
 
 from pull_data import (
     close_get,
-    fetch_all_calls_bulk,
+    fetch_calls_chunk,
     fetch_lead_ids,
     fetch_lead_infos_parallel,
     fetch_status_changes_for_lead,
     fetch_users,
     process_transitions,
     build_snapshot,
+    _calls_rows_to_dict,
     PT,
     MAX_WORKERS,
 )
 
-BATCH_SIZE = int(os.environ.get("CRON_BATCH_SIZE", "100"))
+BATCH_SIZE = int(os.environ.get("CRON_BATCH_SIZE", "30"))
+CALLS_PAGES_PER_STEP = int(os.environ.get("CALLS_PAGES_PER_STEP", "20"))
 
 
 # ── Supabase helpers ──
@@ -66,8 +70,8 @@ def save_state(sb, data):
 
 # ── Phases ──
 
-def do_init(sb, api_key, dry=False):
-    """Start a new run: fetch lead_ids, bulk calls, users — store in state."""
+def do_init_leads(sb, api_key, dry=False):
+    """Step 1: Fetch lead_ids + users in parallel. ~3-4s."""
     t_start = time.time()
     now = datetime.now(timezone.utc)
     pt_now = now.astimezone(PT)
@@ -75,28 +79,32 @@ def do_init(sb, api_key, dry=False):
     start_date = (pt_now - timedelta(days=7)).strftime("%Y-%m-%d")
     api_end = now.isoformat()
 
-    t0 = time.time()
-    lead_ids = fetch_lead_ids(api_key, start_date, api_end)
-    print(f"[init] fetch_lead_ids: {time.time()-t0:.1f}s → {len(lead_ids)} leads")
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        f_leads = executor.submit(fetch_lead_ids, api_key, start_date, api_end)
+        f_users = executor.submit(fetch_users, api_key)
+        lead_ids = f_leads.result()
+        users = f_users.result()
+
+    print(f"[init_leads] {len(lead_ids)} leads, {len(users)} users ({time.time()-t_start:.1f}s)")
+
+    if not lead_ids:
+        save_state(sb, {
+            "phase": "complete", "cursor": 0, "total": 0,
+            "lead_ids": [], "bulk_calls": {}, "users": {},
+            "results": [],
+            "start_date": start_date, "end_date": end_date,
+            "api_end": api_end, "started_at": now.isoformat(), "dry": dry,
+        })
+        return {"status": "complete", "total_leads": 0, "message": "No leads found for this period"}
 
     t0 = time.time()
-    bulk_calls = fetch_all_calls_bulk(api_key, start_date, api_end)
-    total_calls = sum(len(v) for v in bulk_calls.values())
-    print(f"[init] fetch_all_calls_bulk: {time.time()-t0:.1f}s → {total_calls} calls")
-
-    t0 = time.time()
-    users = fetch_users(api_key)
-    print(f"[init] fetch_users: {time.time()-t0:.1f}s → {len(users)} users")
-
-    phase = "processing" if lead_ids else "complete"
-
-    t0 = time.time()
+    # Store call-fetch progress inside bulk_calls (it's empty {} during init_calls)
     save_state(sb, {
-        "phase": phase,
+        "phase": "init_calls",
         "cursor": 0,
         "total": len(lead_ids),
         "lead_ids": lead_ids,
-        "bulk_calls": bulk_calls,
+        "bulk_calls": {"_rows": [], "_skip": 0},
         "users": users,
         "results": [],
         "start_date": start_date,
@@ -105,20 +113,81 @@ def do_init(sb, api_key, dry=False):
         "started_at": now.isoformat(),
         "dry": dry,
     })
+    print(f"[init_leads] save_state: {time.time()-t0:.1f}s")
 
-    print(f"[init] save_state: {time.time()-t0:.1f}s")
-    print(f"[init] TOTAL: {time.time()-t_start:.1f}s")
-
-    if not lead_ids:
-        return {"status": "complete", "total_leads": 0, "message": "No leads found for this period"}
-
+    elapsed = round(time.time() - t_start, 1)
+    print(f"[init_leads] TOTAL: {elapsed}s")
     return {
-        "status": "processing",
+        "status": "init_calls",
         "total_leads": len(lead_ids),
-        "calls_cached": total_calls,
-        "elapsed_s": round(time.time() - t_start, 1),
-        "message": f"Run started — {len(lead_ids)} leads to process in batches of {BATCH_SIZE}",
+        "elapsed_s": elapsed,
+        "message": f"Leads fetched — now fetching calls...",
     }
+
+
+def do_init_calls(sb, api_key, state):
+    """Step 2 (repeated): Fetch calls in chunks of CALLS_PAGES_PER_STEP pages. ~4-5s per step."""
+    t_start = time.time()
+    bc = state.get("bulk_calls", {})
+    skip_from = bc.get("_skip", 0)
+    call_rows = bc.get("_rows", [])
+
+    rows, done = fetch_calls_chunk(
+        api_key, state["start_date"], state["api_end"],
+        skip_from=skip_from, max_pages=CALLS_PAGES_PER_STEP,
+    )
+    call_rows.extend(rows)
+
+    if done:
+        # All calls fetched — convert to dict and move to processing phase
+        bulk_calls = _calls_rows_to_dict(call_rows)
+        total_calls = sum(len(v) for v in bulk_calls.values())
+
+        t0 = time.time()
+        save_state(sb, {
+            "phase": "processing",
+            "cursor": 0,
+            "total": state["total"],
+            "lead_ids": state["lead_ids"],
+            "bulk_calls": bulk_calls,
+            "users": state["users"],
+            "results": [],
+            "start_date": state["start_date"],
+            "end_date": state["end_date"],
+            "api_end": state["api_end"],
+            "started_at": state["started_at"],
+            "dry": state.get("dry", False),
+        })
+        print(f"[init_calls] save_state: {time.time()-t0:.1f}s")
+
+        elapsed = round(time.time() - t_start, 1)
+        print(f"[init_calls] DONE: {len(call_rows)} rows, {total_calls} calls ({elapsed}s)")
+        return {
+            "status": "processing",
+            "total_leads": state["total"],
+            "calls_cached": total_calls,
+            "elapsed_s": elapsed,
+            "message": f"Calls fetched — processing {state['total']} leads in batches of {BATCH_SIZE}",
+        }
+    else:
+        # More calls to fetch — save partial progress inside bulk_calls
+        new_skip = skip_from + CALLS_PAGES_PER_STEP * 100
+
+        t0 = time.time()
+        save_state(sb, {
+            **state,
+            "bulk_calls": {"_rows": call_rows, "_skip": new_skip},
+        })
+        print(f"[init_calls] save_state: {time.time()-t0:.1f}s")
+
+        elapsed = round(time.time() - t_start, 1)
+        print(f"[init_calls] partial: {len(call_rows)} rows so far, next skip={new_skip} ({elapsed}s)")
+        return {
+            "status": "init_calls",
+            "calls_fetched_so_far": len(call_rows),
+            "elapsed_s": elapsed,
+            "message": f"Fetching calls (page {new_skip // 100})...",
+        }
 
 
 def do_batch(sb, api_key, state):
@@ -133,16 +202,39 @@ def do_batch(sb, api_key, state):
     start_date = state["start_date"]
     api_end = state["api_end"]
 
+    # Track retries — if Vercel kills us mid-batch, cursor stays the same.
+    # After 3 attempts on the same cursor, skip ahead to avoid infinite loop.
+    retries = state.get("retries", 0)
+    if retries >= 3:
+        print(f"[batch] Skipping leads {cursor}–{cursor+BATCH_SIZE} after {retries} failed attempts")
+        new_cursor = min(cursor + BATCH_SIZE, len(lead_ids))
+        if new_cursor >= len(lead_ids):
+            return do_finalize(sb, state, now, dry=state.get("dry", False))
+        save_state(sb, {**state, "cursor": new_cursor, "retries": 0})
+        return {
+            "status": "processing",
+            "processed_leads": new_cursor,
+            "total_leads": len(lead_ids),
+            "skipped": True,
+            "message": f"Skipped batch at cursor {cursor} after {retries} timeouts",
+        }
+    # Bump retry counter now — if we get killed, next hit sees retries+1.
+    # On success, save_state at end resets it to 0.
+    sb.table("cron_state").update({
+        "retries": retries + 1,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }).eq("id", "current").execute()
+
     batch = lead_ids[cursor:cursor + BATCH_SIZE]
     if not batch:
         return do_finalize(sb, state, now, dry=state.get("dry", False))
 
-    print(f"[batch] Processing leads {cursor}–{cursor+len(batch)} of {len(lead_ids)}")
+    print(f"[batch] Processing leads {cursor}–{cursor+len(batch)} of {len(lead_ids)} (attempt {retries+1})")
 
-    # Parallel: fetch status changes for this batch
+    # Parallel: fetch status changes for this batch (cap workers to limit rate-limit spikes)
     t0 = time.time()
     transitions = []
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+    with ThreadPoolExecutor(max_workers=6) as executor:
         futures = {
             executor.submit(
                 fetch_status_changes_for_lead, api_key, lid, start_date, api_end
@@ -186,6 +278,7 @@ def do_batch(sb, api_key, state):
         "end_date": state["end_date"],
         "api_end": api_end,
         "started_at": state["started_at"],
+        "retries": 0,
     })
     print(f"[batch] save_state: {time.time()-t0:.1f}s")
 
@@ -273,11 +366,13 @@ class handler(BaseHTTPRequestHandler):
             dry = params.get("dry", [""])[0] == "1"
 
             if reset:
-                result = do_init(sb, api_key, dry=dry)
+                result = do_init_leads(sb, api_key, dry=dry)
             else:
                 state = get_state(sb)
                 if not state or state["phase"] == "idle":
-                    result = do_init(sb, api_key, dry=dry)
+                    result = do_init_leads(sb, api_key, dry=dry)
+                elif state["phase"] == "init_calls":
+                    result = do_init_calls(sb, api_key, state)
                 elif state["phase"] == "processing":
                     result = do_batch(sb, api_key, state)
                 elif state["phase"] == "complete":

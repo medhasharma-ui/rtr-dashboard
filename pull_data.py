@@ -69,27 +69,100 @@ def close_get(endpoint, params=None, api_key=None):
 
 # ── Step 1a: Get lead IDs from updated opportunities ──
 
+def _fetch_page(endpoint, base_params, skip, api_key):
+    """Fetch a single paginated page at the given skip offset."""
+    params = {**base_params, "_skip": skip}
+    return close_get(endpoint, params=params, api_key=api_key)
+
+
+def _fetch_all_pages_parallel(endpoint, base_params, api_key, label="items"):
+    """Fetch page 0 to learn total, then fire remaining pages in parallel.
+    When total_results is missing, uses speculative parallel batches."""
+    base_params = {**base_params, "_limit": 100}
+
+    # Page 0 — learn how many results exist
+    t0 = time.time()
+    first = close_get(endpoint, params={**base_params, "_skip": 0}, api_key=api_key)
+    rows = list(first.get("data", []))
+    total_results = first.get("total_results", 0)
+    has_more = first.get("has_more", False)
+    print(f"  [{label}] page 0: {len(rows)} rows, total_results={total_results}, has_more={has_more} ({time.time()-t0:.1f}s)")
+
+    if not has_more:
+        return rows
+
+    if total_results > len(rows):
+        # We know the total — fire all remaining pages in parallel
+        remaining_skips = list(range(100, total_results, 100))
+        print(f"  [{label}] parallel fetch: {len(remaining_skips)} remaining pages")
+        t0 = time.time()
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = {
+                executor.submit(_fetch_page, endpoint, base_params, skip, api_key): skip
+                for skip in remaining_skips
+            }
+            for future in as_completed(futures):
+                try:
+                    data = future.result()
+                    rows.extend(data.get("data", []))
+                except Exception as e:
+                    print(f"  Warning: page fetch failed (skip={futures[future]}): {e}")
+        print(f"  [{label}] parallel done: {len(rows)} total rows ({time.time()-t0:.1f}s)")
+    else:
+        # No total_results — speculative parallel: fire many pages, collect until data runs out
+        print(f"  [{label}] speculative parallel (no total_results)")
+        t0 = time.time()
+        SPEC_PAGES = 50  # speculate up to 5000 items
+        spec_skips = list(range(100, 100 + SPEC_PAGES * 100, 100))
+        page_results = {}
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = {
+                executor.submit(_fetch_page, endpoint, base_params, skip, api_key): skip
+                for skip in spec_skips
+            }
+            for future in as_completed(futures):
+                skip = futures[future]
+                try:
+                    data = future.result()
+                    page_results[skip] = data.get("data", [])
+                except Exception:
+                    page_results[skip] = []
+        # Collect in order, stop when a page has < 100 rows (partial/empty = end of data)
+        all_full = True
+        for skip in spec_skips:
+            page_rows = page_results.get(skip, [])
+            rows.extend(page_rows)
+            if len(page_rows) < 100:
+                all_full = False
+                break
+        # If every speculative page was full, there may be more data — continue sequentially
+        if all_full:
+            print(f"  [{label}] speculative pages exhausted, continuing sequentially...")
+            next_skip = spec_skips[-1] + 100
+            while True:
+                data = close_get(endpoint, params={**base_params, "_skip": next_skip}, api_key=api_key)
+                page_rows = data.get("data", [])
+                rows.extend(page_rows)
+                if len(page_rows) < 100:
+                    break
+                next_skip += 100
+        print(f"  [{label}] speculative done: {len(rows)} total rows ({time.time()-t0:.1f}s)")
+
+    return rows
+
+
 def fetch_lead_ids(api_key, start_date, end_date):
     """Get unique lead_ids from recently-updated opportunities in REQ pipeline."""
     print(f"Fetching lead IDs ({start_date} to {end_date})...")
-    lead_ids = set()
-    has_more = True
-    skip = 0
-    while has_more:
-        data = close_get("opportunity/", params={
-            "pipeline_id": PIPELINE_ID,
-            "date_updated__gte": start_date,
-            "date_updated__lte": end_date,
-            "_limit": 100,
-            "_skip": skip,
-            "_fields": "lead_id",
-        }, api_key=api_key)
-        for opp in data.get("data", []):
-            lead_ids.add(opp["lead_id"])
-        has_more = data.get("has_more", False)
-        skip += 100
+    rows = _fetch_all_pages_parallel("opportunity/", {
+        "pipeline_id": PIPELINE_ID,
+        "date_updated__gte": start_date,
+        "date_updated__lte": end_date,
+        "_fields": "lead_id",
+    }, api_key, label="opps")
+    lead_ids = list(set(opp["lead_id"] for opp in rows))
     print(f"  Found {len(lead_ids)} leads with updated opportunities")
-    return list(lead_ids)
+    return lead_ids
 
 
 # ── Step 1b: Get status changes per lead (parallel) ──
@@ -149,27 +222,61 @@ def fetch_transitions_parallel(api_key, lead_ids, start_date, end_date):
 def fetch_all_calls_bulk(api_key, start_date, end_date):
     """Bulk-fetch all calls in date range. Returns dict of lead_id → sorted list of call timestamps."""
     print("Bulk-fetching all calls...")
+    rows = _fetch_all_pages_parallel("activity/call/", {
+        "date_created__gte": start_date,
+        "date_created__lte": end_date,
+        "_order_by": "date_created",
+        "_fields": "lead_id,date_created",
+    }, api_key, label="calls")
+    return _calls_rows_to_dict(rows)
+
+
+def _calls_rows_to_dict(rows):
+    """Convert raw call rows to {lead_id: [timestamps]} dict."""
     all_calls = {}
-    has_more = True
-    skip = 0
-    total = 0
-    while has_more:
-        data = close_get("activity/call/", params={
-            "date_created__gte": start_date,
-            "date_created__lte": end_date,
-            "_order_by": "date_created",
-            "_limit": 100,
-            "_skip": skip,
-            "_fields": "lead_id,date_created",
-        }, api_key=api_key)
-        for call in data.get("data", []):
-            lid = call["lead_id"]
-            all_calls.setdefault(lid, []).append(call["date_created"])
-            total += 1
-        has_more = data.get("has_more", False)
-        skip += 100
-    print(f"  Cached {total} calls across {len(all_calls)} leads")
+    for call in rows:
+        lid = call["lead_id"]
+        all_calls.setdefault(lid, []).append(call["date_created"])
+    print(f"  Cached {len(rows)} calls across {len(all_calls)} leads")
     return all_calls
+
+
+def fetch_calls_chunk(api_key, start_date, end_date, skip_from=0, max_pages=25):
+    """Fetch a chunk of call pages speculatively. Returns (rows, done).
+    `done` is True when a page returned < 100 rows (end of data)."""
+    base_params = {
+        "date_created__gte": start_date,
+        "date_created__lte": end_date,
+        "_order_by": "date_created",
+        "_fields": "lead_id,date_created",
+        "_limit": 100,
+    }
+    spec_skips = [skip_from + i * 100 for i in range(max_pages)]
+    page_results = {}
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {
+            executor.submit(_fetch_page, "activity/call/", base_params, skip, api_key): skip
+            for skip in spec_skips
+        }
+        for future in as_completed(futures):
+            skip = futures[future]
+            try:
+                data = future.result()
+                page_results[skip] = data.get("data", [])
+            except Exception:
+                page_results[skip] = []
+
+    rows = []
+    done = False
+    for skip in spec_skips:
+        page_rows = page_results.get(skip, [])
+        rows.extend(page_rows)
+        if len(page_rows) < 100:
+            done = True
+            break
+
+    print(f"  [calls_chunk] skip_from={skip_from} max_pages={max_pages} → {len(rows)} rows, done={done}")
+    return rows, done
 
 
 def find_earliest_call(bulk_calls, lead_id, after_timestamp):
@@ -339,22 +446,25 @@ def main():
         print("Specify --days N or --start/--end dates")
         sys.exit(1)
 
-    # Step 1: Get lead IDs then transitions (parallel)
+    # Step 1: Get lead IDs
     lead_ids = fetch_lead_ids(api_key, start_date, api_end)
     if not lead_ids:
         print("No leads found. Check date range.")
         sys.exit(0)
 
-    transitions = fetch_transitions_parallel(api_key, lead_ids, start_date, api_end)
+    # Step 2: Transitions, bulk calls, and users — all in parallel
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        f_transitions = executor.submit(fetch_transitions_parallel, api_key, lead_ids, start_date, api_end)
+        f_calls = executor.submit(fetch_all_calls_bulk, api_key, start_date, api_end)
+        f_users = executor.submit(fetch_users, api_key)
+
+        transitions = f_transitions.result()
+        bulk_calls = f_calls.result()
+        users = f_users.result()
+
     if not transitions:
         print("No RTR transitions found.")
         sys.exit(0)
-
-    # Step 2: Bulk-fetch calls + users
-    bulk_calls = fetch_all_calls_bulk(api_key, start_date, api_end)
-
-    print("Fetching user directory...")
-    users = fetch_users(api_key)
 
     # Step 3: Lead info for transition leads (parallel)
     transition_lead_ids = list(set(t["lead_id"] for t in transitions))
