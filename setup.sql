@@ -1,10 +1,35 @@
--- Run this in Supabase SQL Editor to create the cron state table.
--- This table stores the cursor/progress for the batched cron job.
--- Only one row (id='current') is used.
+-- ============================================================
+-- Speed-to-Call Dashboard — Full Database Setup
+-- Run this in Supabase SQL Editor for a fresh deployment.
+-- Safe to re-run (all statements are idempotent).
+-- ============================================================
+
+
+-- 1. dashboard_snapshots — stores pipeline result snapshots
+--    Written by cron (service key), read by frontend (anon key).
+
+CREATE TABLE IF NOT EXISTS dashboard_snapshots (
+  id           uuid         DEFAULT gen_random_uuid() PRIMARY KEY,
+  generated_at timestamptz  NOT NULL,
+  data         jsonb        NOT NULL
+);
+
+ALTER TABLE dashboard_snapshots ENABLE ROW LEVEL SECURITY;
+
+-- Allow frontend (anon/publishable key) to read snapshots
+DROP POLICY IF EXISTS "anon_select_snapshots" ON dashboard_snapshots;
+CREATE POLICY "anon_select_snapshots"
+  ON dashboard_snapshots FOR SELECT
+  TO anon
+  USING (true);
+
+
+-- 2. cron_state — tracks batch processing progress
+--    Single row (id='current'). Only accessed by service key.
 
 CREATE TABLE IF NOT EXISTS cron_state (
   id          text        PRIMARY KEY DEFAULT 'current',
-  phase       text        NOT NULL DEFAULT 'idle',   -- idle | init_calls | processing | complete
+  phase       text        NOT NULL DEFAULT 'idle',
   cursor      int         NOT NULL DEFAULT 0,
   total       int         NOT NULL DEFAULT 0,
   lead_ids    jsonb       DEFAULT '[]'::jsonb,
@@ -20,13 +45,15 @@ CREATE TABLE IF NOT EXISTS cron_state (
   updated_at  timestamptz
 );
 
--- If upgrading an existing table, add the retries column:
-ALTER TABLE cron_state ADD COLUMN IF NOT EXISTS retries int NOT NULL DEFAULT 0;
+ALTER TABLE cron_state ENABLE ROW LEVEL SECURITY;
+-- No anon policies — only service key can read/write this table.
 
 -- Seed the initial row
 INSERT INTO cron_state (id) VALUES ('current')
 ON CONFLICT (id) DO NOTHING;
 
--- Enable RLS — no anon policies means only the secret key can access this table.
--- The frontend never touches this table; only the serverless functions do.
-ALTER TABLE cron_state ENABLE ROW LEVEL SECURITY;
+
+-- 3. Migrations for existing deployments
+--    These are no-ops on a fresh install.
+
+ALTER TABLE cron_state ADD COLUMN IF NOT EXISTS retries int NOT NULL DEFAULT 0;
