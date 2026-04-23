@@ -186,6 +186,19 @@ document.addEventListener("click", (e) => {
   if (!e.target.closest(".multi-select")) closeAEPanel();
 });
 
+// ── Definitions modal ──
+function toggleDefinitions() {
+  const m = document.getElementById("defnModal");
+  m.hidden = !m.hidden;
+}
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    const m = document.getElementById("defnModal");
+    if (m && !m.hidden) m.hidden = true;
+  }
+});
+
 function sortAETable(col) {
   if (aeSortCol === col) aeSortAsc = !aeSortAsc;
   else { aeSortCol = col; aeSortAsc = true; }

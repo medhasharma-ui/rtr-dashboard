@@ -14,11 +14,60 @@
   <p class="meta" id="meta"></p>
 </div>
 
-<div class="date-range" id="dateRange">
-  <button data-range="all" class="active">All <span class="count-badge">--</span></button>
+<div class="tabs-row">
+  <div class="date-range" id="dateRange">
+    <button data-range="all" class="active">All <span class="count-badge">--</span></button>
+  </div>
+  <button class="defn-tab-btn" onclick="toggleDefinitions()">Definitions</button>
 </div>
 
 <p class="range-info" id="rangeInfo"></p>
+
+<div class="defn-modal" id="defnModal" hidden onclick="if(event.target===this)toggleDefinitions()">
+  <div class="defn-modal-content">
+    <button class="defn-close" onclick="toggleDefinitions()" aria-label="Close">&times;</button>
+    <h2>Dashboard Definitions</h2>
+
+    <h3>Tracked transitions</h3>
+    <p>Opportunities moving from <strong>Ready to Respond</strong> to one of:</p>
+    <ul>
+      <li>Active Scenario</li>
+      <li>Declined Scenario</li>
+      <li>Additional Information Needed</li>
+    </ul>
+
+    <h3>Date tabs (Pacific Time)</h3>
+    <ul>
+      <li><strong>All</strong> — everything in the current snapshot range</li>
+      <li><strong>MTD</strong> — 1st of the current PT month through today</li>
+      <li><strong>WTD</strong> — Monday of the current PT week through today</li>
+      <li><strong>Apr 14 / Apr 15 / …</strong> — leads whose status change happened on that PT date</li>
+      <li><strong>Yesterday / Today</strong> — pinned shortcuts</li>
+    </ul>
+    <p class="defn-note">Leads are bucketed by the PT date of the status change, not the call date.</p>
+
+    <h3>Bucket definitions</h3>
+    <ul>
+      <li><strong>Called within 2 hrs</strong> — a connected call (duration &gt; 0, status = answered) in the 30&nbsp;min window <em>before</em> the status change, <em>or</em> any call within 120&nbsp;min <em>after</em> it.</li>
+      <li><strong>Pre-call</strong> — subset of "Within 2 hrs": a connected call in the 30&nbsp;min window before the status change.</li>
+      <li><strong>Called after 2 hrs</strong> — first post-trigger call happened more than 120&nbsp;min after the status change. No upper limit — the call could be the next day or later.</li>
+      <li><strong>Never called</strong> — no post-trigger call existed <em>at the moment of the snapshot pull</em> and the trigger was ≥ 2&nbsp;hrs ago. A lead can flip to "After 2 hrs" on the next pull if a call happens later.</li>
+      <li><strong>Within SLA</strong> — status changed &lt; 2&nbsp;hrs ago; still inside the SLA window.</li>
+    </ul>
+
+    <h3>Metrics</h3>
+    <ul>
+      <li><strong>Eligible</strong> = Within + After + Never (excludes Within&nbsp;SLA).</li>
+      <li><strong>Call rate</strong> = (Within + After) / Eligible × 100%. Pre-call is already counted inside Within.</li>
+    </ul>
+
+    <h3>Refresh schedule</h3>
+    <ul>
+      <li>MTD / historical — daily at 11:00&nbsp;UTC (4am PDT / 3am PST).</li>
+      <li>Today + Yesterday — every 6 hours.</li>
+    </ul>
+  </div>
+</div>
 
 <div class="cards">
   <div class="card green" data-filter="within" onclick="filterBy('within')">
