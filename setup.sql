@@ -49,20 +49,12 @@ CREATE TABLE IF NOT EXISTS cron_state (
 ALTER TABLE cron_state ENABLE ROW LEVEL SECURITY;
 -- No anon policies — only service key can read/write this table.
 
--- Seed rows for each mode
-INSERT INTO cron_state (id, range_type) VALUES ('mtd', 'mtd')
-ON CONFLICT (id) DO NOTHING;
-INSERT INTO cron_state (id, range_type) VALUES ('recent', 'recent')
-ON CONFLICT (id) DO NOTHING;
-
-
 -- 3. Migrations for existing deployments
---    These are no-ops on a fresh install.
-
+--    These are no-ops on a fresh install (columns already exist).
 ALTER TABLE cron_state ADD COLUMN IF NOT EXISTS retries int NOT NULL DEFAULT 0;
 ALTER TABLE cron_state ADD COLUMN IF NOT EXISTS range_type text DEFAULT 'mtd';
 
--- Migrate from single-row (id='current') to per-mode rows
+-- Seed / migrate to per-mode rows (idempotent)
 INSERT INTO cron_state (id, range_type) VALUES ('mtd', 'mtd')
 ON CONFLICT (id) DO NOTHING;
 INSERT INTO cron_state (id, range_type) VALUES ('recent', 'recent')
