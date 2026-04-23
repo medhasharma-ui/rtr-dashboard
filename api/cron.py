@@ -7,10 +7,16 @@ An external caller loops until /api/status reports phase="complete".
 Phase state machine:
   idle → init_leads → init_calls → processing → complete
 
+Two modes run independently with separate state rows:
+  mode=mtd    — month-to-date pull (state id='mtd')
+  mode=recent — today+yesterday pull (state id='recent')
+
 Endpoints:
-  GET /api/cron          — process next step (or start new run if idle)
-  GET /api/cron?reset=1  — force-reset state and start a fresh run
-  GET /api/cron?dry=1    — dry-run mode: skips snapshot insert, returns data in response
+  GET /api/cron?mode=mtd          — process next MTD step
+  GET /api/cron?mode=recent       — process next recent step
+  GET /api/cron?reset=1&mode=mtd  — force-reset and start a fresh MTD run
+  GET /api/cron?reset=1&mode=recent — force-reset and start a fresh recent run
+  GET /api/cron?dry=1             — dry-run mode: skips snapshot insert
 
 Requires env vars: CLOSE_API_KEY, SUPABASE_URL, SUPABASE_SECRET_KEY
 
@@ -58,26 +64,34 @@ def get_supabase():
     )
 
 
-def get_state(sb):
-    rows = sb.table("cron_state").select("*").eq("id", "current").execute()
+def get_state(sb, mode="mtd"):
+    rows = sb.table("cron_state").select("*").eq("id", mode).execute()
     return rows.data[0] if rows.data else None
 
 
-def save_state(sb, data):
+def save_state(sb, data, mode="mtd"):
     data["updated_at"] = datetime.now(timezone.utc).isoformat()
-    sb.table("cron_state").upsert({**data, "id": "current"}).execute()
+    sb.table("cron_state").upsert({**data, "id": mode}).execute()
 
 
 # ── Phases ──
 
-def do_init_leads(sb, api_key, dry=False):
+def do_init_leads(sb, api_key, dry=False, mode="mtd"):
     """Step 1: Fetch lead_ids + users in parallel. ~3-4s."""
     t_start = time.time()
     now = datetime.now(timezone.utc)
     pt_now = now.astimezone(PT)
     end_date = pt_now.strftime("%Y-%m-%d")
-    start_date = (pt_now - timedelta(days=7)).strftime("%Y-%m-%d")
     api_end = now.isoformat()
+
+    if mode == "recent":
+        start_date = (pt_now - timedelta(days=1)).strftime("%Y-%m-%d")
+        range_type = "recent"
+    else:  # mtd
+        start_date = pt_now.replace(day=1).strftime("%Y-%m-%d")
+        range_type = "mtd"
+
+    print(f"[init_leads] mode={mode} range_type={range_type} {start_date} → {end_date}")
 
     with ThreadPoolExecutor(max_workers=2) as executor:
         f_leads = executor.submit(fetch_lead_ids, api_key, start_date, api_end)
@@ -93,8 +107,9 @@ def do_init_leads(sb, api_key, dry=False):
             "lead_ids": [], "bulk_calls": {}, "users": {},
             "results": [],
             "start_date": start_date, "end_date": end_date,
-            "api_end": api_end, "started_at": now.isoformat(), "dry": dry,
-        })
+            "api_end": api_end, "range_type": range_type,
+            "started_at": now.isoformat(), "dry": dry,
+        }, mode=mode)
         return {"status": "complete", "total_leads": 0, "message": "No leads found for this period"}
 
     t0 = time.time()
@@ -110,9 +125,10 @@ def do_init_leads(sb, api_key, dry=False):
         "start_date": start_date,
         "end_date": end_date,
         "api_end": api_end,
+        "range_type": range_type,
         "started_at": now.isoformat(),
         "dry": dry,
-    })
+    }, mode=mode)
     print(f"[init_leads] save_state: {time.time()-t0:.1f}s")
 
     elapsed = round(time.time() - t_start, 1)
@@ -125,7 +141,7 @@ def do_init_leads(sb, api_key, dry=False):
     }
 
 
-def do_init_calls(sb, api_key, state):
+def do_init_calls(sb, api_key, state, mode="mtd"):
     """Step 2 (repeated): Fetch calls in chunks of CALLS_PAGES_PER_STEP pages. ~4-5s per step."""
     t_start = time.time()
     bc = state.get("bulk_calls", {})
@@ -155,9 +171,10 @@ def do_init_calls(sb, api_key, state):
             "start_date": state["start_date"],
             "end_date": state["end_date"],
             "api_end": state["api_end"],
+            "range_type": state.get("range_type", "mtd"),
             "started_at": state["started_at"],
             "dry": state.get("dry", False),
-        })
+        }, mode=mode)
         print(f"[init_calls] save_state: {time.time()-t0:.1f}s")
 
         elapsed = round(time.time() - t_start, 1)
@@ -177,7 +194,7 @@ def do_init_calls(sb, api_key, state):
         save_state(sb, {
             **state,
             "bulk_calls": {"_rows": call_rows, "_skip": new_skip},
-        })
+        }, mode=mode)
         print(f"[init_calls] save_state: {time.time()-t0:.1f}s")
 
         elapsed = round(time.time() - t_start, 1)
@@ -190,7 +207,7 @@ def do_init_calls(sb, api_key, state):
         }
 
 
-def do_batch(sb, api_key, state):
+def do_batch(sb, api_key, state, mode="mtd"):
     """Process next batch of leads."""
     t_start = time.time()
     now = datetime.now(timezone.utc)
@@ -210,7 +227,7 @@ def do_batch(sb, api_key, state):
         new_cursor = min(cursor + BATCH_SIZE, len(lead_ids))
         if new_cursor >= len(lead_ids):
             return do_finalize(sb, state, now, dry=state.get("dry", False))
-        save_state(sb, {**state, "cursor": new_cursor, "retries": 0})
+        save_state(sb, {**state, "cursor": new_cursor, "retries": 0}, mode=mode)
         return {
             "status": "processing",
             "processed_leads": new_cursor,
@@ -223,7 +240,7 @@ def do_batch(sb, api_key, state):
     sb.table("cron_state").update({
         "retries": retries + 1,
         "updated_at": datetime.now(timezone.utc).isoformat(),
-    }).eq("id", "current").execute()
+    }).eq("id", mode).execute()
 
     batch = lead_ids[cursor:cursor + BATCH_SIZE]
     if not batch:
@@ -256,14 +273,14 @@ def do_batch(sb, api_key, state):
 
     # Classify using pre-fetched bulk calls
     t0 = time.time()
-    batch_results = process_transitions(transitions, bulk_calls, lead_infos, users, now)
+    batch_results = process_transitions(api_key, transitions, bulk_calls, lead_infos, users, now)
     results.extend(batch_results)
     print(f"[batch] classify: {time.time()-t0:.1f}s → {len(batch_results)} results")
 
     new_cursor = cursor + len(batch)
 
     if new_cursor >= len(lead_ids):
-        return do_finalize(sb, {**state, "results": results}, now, dry=state.get("dry", False))
+        return do_finalize(sb, {**state, "results": results}, now, dry=state.get("dry", False), mode=mode)
 
     t0 = time.time()
     save_state(sb, {
@@ -277,9 +294,10 @@ def do_batch(sb, api_key, state):
         "start_date": state["start_date"],
         "end_date": state["end_date"],
         "api_end": api_end,
+        "range_type": state.get("range_type", "mtd"),
         "started_at": state["started_at"],
         "retries": 0,
-    })
+    }, mode=mode)
     print(f"[batch] save_state: {time.time()-t0:.1f}s")
 
     elapsed = round(time.time() - t_start, 1)
@@ -296,11 +314,12 @@ def do_batch(sb, api_key, state):
     }
 
 
-def do_finalize(sb, state, now, dry=False):
+def do_finalize(sb, state, now, dry=False, mode="mtd"):
     """Write snapshot to dashboard_snapshots and mark run complete."""
     t_start = time.time()
     results = state["results"]
-    snapshot = build_snapshot(results, state["start_date"], state["end_date"], now)
+    snapshot = build_snapshot(results, state["start_date"], state["end_date"], now,
+                              range_type=state.get("range_type", "mtd"))
 
     if not dry:
         t0 = time.time()
@@ -325,8 +344,9 @@ def do_finalize(sb, state, now, dry=False):
         "start_date": state["start_date"],
         "end_date": state["end_date"],
         "api_end": state.get("api_end"),
+        "range_type": state.get("range_type", "mtd"),
         "started_at": state["started_at"],
-    })
+    }, mode=mode)
 
     within = sum(1 for r in results if r["bucket"] == "within")
     after = sum(1 for r in results if r["bucket"] == "after")
@@ -364,21 +384,23 @@ class handler(BaseHTTPRequestHandler):
 
             reset = params.get("reset", [""])[0] == "1"
             dry = params.get("dry", [""])[0] == "1"
+            mode = params.get("mode", ["mtd"])[0]  # "mtd" or "recent"
 
             if reset:
-                result = do_init_leads(sb, api_key, dry=dry)
+                result = do_init_leads(sb, api_key, dry=dry, mode=mode)
             else:
-                state = get_state(sb)
+                state = get_state(sb, mode=mode)
                 if not state or state["phase"] == "idle":
-                    result = do_init_leads(sb, api_key, dry=dry)
+                    result = do_init_leads(sb, api_key, dry=dry, mode=mode)
                 elif state["phase"] == "init_calls":
-                    result = do_init_calls(sb, api_key, state)
+                    result = do_init_calls(sb, api_key, state, mode=mode)
                 elif state["phase"] == "processing":
-                    result = do_batch(sb, api_key, state)
+                    result = do_batch(sb, api_key, state, mode=mode)
                 elif state["phase"] == "complete":
                     result = {
                         "status": "complete",
-                        "message": "Run already complete. Hit /api/cron?reset=1 to start a new run.",
+                        "mode": mode,
+                        "message": f"Run already complete. Hit /api/cron?reset=1&mode={mode} to start a new run.",
                         "started_at": state.get("started_at"),
                     }
                 else:

@@ -25,10 +25,10 @@ CREATE POLICY "anon_select_snapshots"
 
 
 -- 2. cron_state — tracks batch processing progress
---    Single row (id='current'). Only accessed by service key.
+--    One row per mode: 'mtd' and 'recent'. Only accessed by service key.
 
 CREATE TABLE IF NOT EXISTS cron_state (
-  id          text        PRIMARY KEY DEFAULT 'current',
+  id          text        PRIMARY KEY,
   phase       text        NOT NULL DEFAULT 'idle',
   cursor      int         NOT NULL DEFAULT 0,
   total       int         NOT NULL DEFAULT 0,
@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS cron_state (
   start_date  text,
   end_date    text,
   api_end     text,
+  range_type  text        DEFAULT 'mtd',
   dry         boolean     DEFAULT false,
   retries     int         NOT NULL DEFAULT 0,
   started_at  timestamptz,
@@ -48,8 +49,10 @@ CREATE TABLE IF NOT EXISTS cron_state (
 ALTER TABLE cron_state ENABLE ROW LEVEL SECURITY;
 -- No anon policies — only service key can read/write this table.
 
--- Seed the initial row
-INSERT INTO cron_state (id) VALUES ('current')
+-- Seed rows for each mode
+INSERT INTO cron_state (id, range_type) VALUES ('mtd', 'mtd')
+ON CONFLICT (id) DO NOTHING;
+INSERT INTO cron_state (id, range_type) VALUES ('recent', 'recent')
 ON CONFLICT (id) DO NOTHING;
 
 
@@ -57,3 +60,11 @@ ON CONFLICT (id) DO NOTHING;
 --    These are no-ops on a fresh install.
 
 ALTER TABLE cron_state ADD COLUMN IF NOT EXISTS retries int NOT NULL DEFAULT 0;
+ALTER TABLE cron_state ADD COLUMN IF NOT EXISTS range_type text DEFAULT 'mtd';
+
+-- Migrate from single-row (id='current') to per-mode rows
+INSERT INTO cron_state (id, range_type) VALUES ('mtd', 'mtd')
+ON CONFLICT (id) DO NOTHING;
+INSERT INTO cron_state (id, range_type) VALUES ('recent', 'recent')
+ON CONFLICT (id) DO NOTHING;
+DELETE FROM cron_state WHERE id = 'current';

@@ -337,6 +337,39 @@ def fetch_lead_infos_parallel(api_key, lead_ids):
     return results
 
 
+def fetch_pre_trigger_call(api_key, lead_id, changed_at_str):
+    """
+    Find the earliest *connected* call on a lead in the 30-minute window
+    immediately before the status change.
+    Connected = duration > 0 AND status == "completed" (Close's "answered").
+    """
+    changed_at = datetime.fromisoformat(changed_at_str.replace("Z", "+00:00"))
+    window_start = (changed_at - timedelta(minutes=30)).isoformat()
+    try:
+        data = close_get(
+            "activity/call/",
+            params={
+                "lead_id": lead_id,
+                "date_created__gte": window_start,
+                "date_created__lte": changed_at_str,
+                "_order_by": "date_created",
+                "_limit": 50,
+                "_fields": "date_created,duration,status",
+            },
+            api_key=api_key,
+        )
+        for call in data.get("data", []):
+            ts = call["date_created"]
+            if datetime.fromisoformat(ts.replace("Z", "+00:00")) >= changed_at:
+                continue
+            if call.get("duration", 0) > 0 and call.get("status") == "completed":
+                return ts
+        return None
+    except Exception as e:
+        print(f"  Warning: Could not fetch pre-trigger calls for lead {lead_id}: {e}")
+        return None
+
+
 # ── Step 4: Users ──
 
 def fetch_users(api_key):
@@ -353,15 +386,24 @@ def fetch_users(api_key):
 
 # ── Step 5: Classify ──
 
-def classify(changed_at_str, call_at_str, now):
-    """Classify a lead into a bucket."""
+def classify(changed_at_str, call_at_str, pre_call_at_str, now):
+    """
+    Classify a lead into a bucket.
+    A connected call in the 30-min pre-trigger window also counts as "within".
+    """
     changed_at = datetime.fromisoformat(changed_at_str.replace("Z", "+00:00"))
     elapsed_mins = (now - changed_at).total_seconds() / 60
+    has_pre = bool(pre_call_at_str)
+
     if call_at_str:
         call_at = datetime.fromisoformat(call_at_str.replace("Z", "+00:00"))
         mins_to_call = (call_at - changed_at).total_seconds() / 60
-        bucket = "within" if mins_to_call <= 120 else "after"
+        bucket = "within" if (has_pre or mins_to_call <= 120) else "after"
         return bucket, round(mins_to_call, 1)
+
+    if has_pre:
+        return "within", None
+
     if elapsed_mins < 120:
         return "pending", None
     return "never", None
@@ -369,7 +411,7 @@ def classify(changed_at_str, call_at_str, now):
 
 # ── Processing helpers ──
 
-def process_transitions(transitions, bulk_calls, lead_infos, users, now):
+def process_transitions(api_key, transitions, bulk_calls, lead_infos, users, now):
     """Classify transitions using pre-fetched bulk data."""
     results = []
     seen_keys = set()
@@ -385,7 +427,8 @@ def process_transitions(transitions, bulk_calls, lead_infos, users, now):
             "lead_name": "(Unknown)", "contact_name": "(Unknown)", "user_id": None
         })
         call_at = find_earliest_call(bulk_calls, lead_id, changed_at)
-        bucket, mins_to_call = classify(changed_at, call_at, now)
+        pre_call_at = fetch_pre_trigger_call(api_key, lead_id, changed_at)
+        bucket, mins_to_call = classify(changed_at, call_at, pre_call_at, now)
 
         ae_user_id = lead_info.get("user_id") or t.get("user_id")
         ae_name = users.get(ae_user_id, "Unknown")
@@ -395,6 +438,8 @@ def process_transitions(transitions, bulk_calls, lead_infos, users, now):
             "ae": ae_name,
             "changedAt": changed_at,
             "callAt": call_at,
+            "preCallAt": pre_call_at,
+            "preCall": bool(pre_call_at),
             "minsToCall": mins_to_call,
             "bucket": bucket,
             "leadId": lead_id,
@@ -404,7 +449,7 @@ def process_transitions(transitions, bulk_calls, lead_infos, users, now):
     return results
 
 
-def build_snapshot(results, start_date, end_date, now):
+def build_snapshot(results, start_date, end_date, now, range_type="custom"):
     """Build the final snapshot JSON."""
     by_date = {}
     for r in results:
@@ -413,6 +458,7 @@ def build_snapshot(results, start_date, end_date, now):
         by_date.setdefault(date_key, []).append(r)
     return {
         "generated_at": now.isoformat(),
+        "range_type": range_type,
         "start_date": start_date,
         "end_date": end_date,
         "total_leads": len(results),
@@ -426,6 +472,8 @@ def build_snapshot(results, start_date, end_date, now):
 def main():
     parser = argparse.ArgumentParser(description="Pull Speed-to-Call data from Close CRM")
     parser.add_argument("--days", type=int, help="Pull last N days of data")
+    parser.add_argument("--mtd", action="store_true", help="Pull from the 1st of the current PT month through now")
+    parser.add_argument("--recent", action="store_true", help="Pull today + yesterday (PT) only")
     parser.add_argument("--start", type=str, help="Start date (YYYY-MM-DD)")
     parser.add_argument("--end", type=str, help="End date (YYYY-MM-DD)")
     args = parser.parse_args()
@@ -434,16 +482,28 @@ def main():
     now = datetime.now(timezone.utc)
     pt_now = now.astimezone(PT)
 
-    if args.days:
+    if args.mtd:
+        range_type = "mtd"
+        end_date = pt_now.strftime("%Y-%m-%d")
+        start_date = pt_now.replace(day=1).strftime("%Y-%m-%d")
+        api_end = now.isoformat()
+    elif args.recent:
+        range_type = "recent"
+        end_date = pt_now.strftime("%Y-%m-%d")
+        start_date = (pt_now - timedelta(days=1)).strftime("%Y-%m-%d")
+        api_end = now.isoformat()
+    elif args.days:
+        range_type = "custom"
         end_date = pt_now.strftime("%Y-%m-%d")
         start_date = (pt_now - timedelta(days=args.days)).strftime("%Y-%m-%d")
         api_end = now.isoformat()
     elif args.start and args.end:
+        range_type = "custom"
         start_date = args.start
         end_date = args.end
         api_end = f"{args.end}T23:59:59+00:00"
     else:
-        print("Specify --days N or --start/--end dates")
+        print("Specify --mtd, --recent, --days N, or --start/--end dates")
         sys.exit(1)
 
     # Step 1: Get lead IDs
@@ -471,10 +531,10 @@ def main():
     lead_infos = fetch_lead_infos_parallel(api_key, transition_lead_ids)
 
     # Step 4: Classify
-    results = process_transitions(transitions, bulk_calls, lead_infos, users, now)
+    results = process_transitions(api_key, transitions, bulk_calls, lead_infos, users, now)
 
     # Step 5: Build snapshot and write to Supabase
-    snapshot = build_snapshot(results, start_date, end_date, now)
+    snapshot = build_snapshot(results, start_date, end_date, now, range_type)
 
     supabase_url = os.environ.get("SUPABASE_URL")
     supabase_key = os.environ.get("SUPABASE_SECRET_KEY")
@@ -492,9 +552,11 @@ def main():
     after = sum(1 for r in results if r["bucket"] == "after")
     never = sum(1 for r in results if r["bucket"] == "never")
     pending = sum(1 for r in results if r["bucket"] == "pending")
+    pre_call = sum(1 for r in results if r.get("preCall"))
 
     print(f"\nDone! {len(results)} leads processed.")
     print(f"  Within 2 hrs: {within}")
+    print(f"  Pre-call:     {pre_call}")
     print(f"  After 2 hrs:  {after}")
     print(f"  Never called: {never}")
     print(f"  Pending:      {pending}")

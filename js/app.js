@@ -6,10 +6,13 @@ let currentAEs = [];                  // empty = all AEs
 let currentTransition = "all";
 let sortCol = 5;
 let sortAsc = true;
-let aeSortCol = 6;
+let aeSortCol = 7;
 let aeSortAsc = true;
 
 // ── Load data ──
+// The /api/snapshot endpoint handles dual-snapshot merging server-side:
+// it finds the latest MTD snapshot and overlays any fresher "recent"
+// (today+yesterday) snapshot on top, returning a single merged result.
 async function loadData() {
   try {
     const resp = await fetch("/api/snapshot");
@@ -18,8 +21,13 @@ async function loadData() {
     if (dashData.error) throw new Error(dashData.error);
     buildDateButtons();
     render();
-    document.getElementById("meta").textContent =
-      `Data pulled: ${new Date(dashData.generated_at).toLocaleString()} | Range: ${dashData.start_date} to ${dashData.end_date}`;
+
+    const pulled = new Date(dashData.generated_at).toLocaleString();
+    const recentPulled = dashData._recent_generated_at
+      ? new Date(dashData._recent_generated_at).toLocaleString() : null;
+    document.getElementById("meta").textContent = recentPulled
+      ? `MTD pulled: ${pulled} | Today/Yesterday pulled: ${recentPulled} | Range: ${dashData.start_date} → ${dashData.end_date}`
+      : `Data pulled: ${pulled} | Range: ${dashData.start_date} → ${dashData.end_date}`;
   } catch (e) {
     document.getElementById("tableBody").innerHTML =
       `<tr><td colspan="8" class="loading">Could not load data: ${e.message}</td></tr>`;
@@ -32,24 +40,44 @@ function ptDateKey(date) {
   return date.toLocaleDateString("en-CA", { timeZone: "America/Los_Angeles" });
 }
 
+// Compute MTD/WTD/last-7-days start keys in PT
+function rangeBoundaries() {
+  const today = ptDateKey(new Date());
+  const [ty, tm, td] = today.split("-").map(Number);
+  const mtdStart = `${ty}-${String(tm).padStart(2, "0")}-01`;
+  const todayUTC = new Date(Date.UTC(ty, tm - 1, td));
+  const daysFromMonday = (todayUTC.getUTCDay() + 6) % 7;  // Mon=0 … Sun=6
+  const wtdStart = new Date(Date.UTC(ty, tm - 1, td - daysFromMonday)).toISOString().slice(0, 10);
+  const sevenDaysAgo = new Date(Date.UTC(ty, tm - 1, td - 7)).toISOString().slice(0, 10);
+  return { today, mtdStart, wtdStart, sevenDaysAgo };
+}
+
+function countSince(startKey) {
+  return Object.entries(dashData.by_date)
+    .filter(([d]) => d >= startKey)
+    .reduce((s, [, leads]) => s + leads.length, 0);
+}
+
 function buildDateButtons() {
   const container = document.getElementById("dateRange");
-  const today = ptDateKey(new Date());
+  const { today, mtdStart, wtdStart, sevenDaysAgo } = rangeBoundaries();
   const yesterday = ptDateKey(new Date(Date.now() - 86400000));
   const dates = Object.keys(dashData.by_date).sort();
 
   let html = `<button data-range="all" class="active" onclick="setRange('all')">All <span class="count-badge">${dashData.all.length}</span></button>`;
+  html += `<button data-range="mtd" onclick="setRange('mtd')">MTD <span class="count-badge">${countSince(mtdStart)}</span></button>`;
+  html += `<button data-range="wtd" onclick="setRange('wtd')">WTD <span class="count-badge">${countSince(wtdStart)}</span></button>`;
 
-  // Older dates (excluding today/yesterday — those are pinned at the end)
+  // Individual date tabs limited to the last 7 days (older data still reachable via MTD/All)
   for (const date of dates) {
     if (date === today || date === yesterday) continue;
+    if (date < sevenDaysAgo) continue;
     const count = dashData.by_date[date].length;
     const d = new Date(date + "T12:00:00Z");
     const label = d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
     html += `<button data-range="${date}" onclick="setRange('${date}')">${label} <span class="count-badge">${count}</span></button>`;
   }
 
-  // Always show Yesterday then Today at the end (count = 0 if no data)
   const yesterdayCount = (dashData.by_date[yesterday] || []).length;
   html += `<button data-range="${yesterday}" onclick="setRange('${yesterday}')">Yesterday <span class="count-badge">${yesterdayCount}</span></button>`;
 
@@ -145,23 +173,38 @@ function render() {
   if (!dashData) return;
 
   const now = new Date(dashData.generated_at);
-  const rawData = activeRange === "all"
-    ? dashData.all
-    : (dashData.by_date[activeRange] || []);
+  const { mtdStart, wtdStart } = rangeBoundaries();
+
+  let rawData;
+  if (activeRange === "all") {
+    rawData = dashData.all;
+  } else if (activeRange === "mtd" || activeRange === "wtd") {
+    const startKey = activeRange === "mtd" ? mtdStart : wtdStart;
+    rawData = [];
+    for (const [date, leads] of Object.entries(dashData.by_date)) {
+      if (date >= startKey) rawData.push(...leads);
+    }
+  } else {
+    rawData = dashData.by_date[activeRange] || [];
+  }
 
   const processed = rawData.map(r => ({ ...r }));
 
   // Range info
   const rangeInfo = activeRange === "all"
     ? `${dashData.start_date} to ${dashData.end_date} | ${processed.length} leads`
+    : activeRange === "mtd" ? `MTD (${mtdStart} →) | ${processed.length} leads`
+    : activeRange === "wtd" ? `WTD (${wtdStart} →) | ${processed.length} leads`
     : `${activeRange} | ${processed.length} leads`;
   document.getElementById("rangeInfo").textContent = rangeInfo;
 
   if (!processed.length) {
     document.getElementById("withinCount").textContent = "--";
+    document.getElementById("precallCount").textContent = "--";
     document.getElementById("afterCount").textContent = "--";
     document.getElementById("neverCount").textContent = "--";
     document.getElementById("withinPct").textContent = "";
+    document.getElementById("precallPct").textContent = "";
     document.getElementById("afterPct").textContent = "";
     document.getElementById("neverPct").textContent = "";
     document.getElementById("tableBody").innerHTML =
@@ -196,18 +239,23 @@ function render() {
   // Apply filters
   const transProcessed = currentTransition === "all" ? processed : processed.filter(r => (r.transition || "Active Scenario") === currentTransition);
   const aeProcessed = currentAEs.length === 0 ? transProcessed : transProcessed.filter(r => currentAEs.includes(r.ae));
-  const filtered = currentFilter === "all" ? aeProcessed : aeProcessed.filter(r => r.bucket === currentFilter);
+  const filtered = currentFilter === "all" ? aeProcessed
+    : currentFilter === "precall" ? aeProcessed.filter(r => r.preCall)
+    : aeProcessed.filter(r => r.bucket === currentFilter);
 
   const within = aeProcessed.filter(r => r.bucket === "within").length;
   const after  = aeProcessed.filter(r => r.bucket === "after").length;
   const never  = aeProcessed.filter(r => r.bucket === "never").length;
   const pending = aeProcessed.filter(r => r.bucket === "pending").length;
+  const preCall = aeProcessed.filter(r => r.preCall).length;
   const eligible = within + after + never;
 
   document.getElementById("withinCount").textContent = within;
+  document.getElementById("precallCount").textContent = preCall;
   document.getElementById("afterCount").textContent = after;
   document.getElementById("neverCount").textContent = never;
   document.getElementById("withinPct").textContent = eligible ? Math.round(within/eligible*100) + "% of eligible" : "";
+  document.getElementById("precallPct").textContent = within ? Math.round(preCall/within*100) + "% of within" : "";
   document.getElementById("afterPct").textContent = eligible ? Math.round(after/eligible*100) + "% of eligible" : "";
   document.getElementById("neverPct").textContent = eligible
     ? Math.round(never/eligible*100) + "% of eligible" + (pending ? "  |  " + pending + " pending" : "")
@@ -218,13 +266,14 @@ function render() {
   const aeSource = currentTransition === "all" ? processed : processed.filter(r => (r.transition || "Active Scenario") === currentTransition);
   const aeMap = {};
   aeSource.forEach(r => {
-    if (!aeMap[r.ae]) aeMap[r.ae] = { ae: r.ae, total: 0, within: 0, after: 0, never: 0, pending: 0 };
+    if (!aeMap[r.ae]) aeMap[r.ae] = { ae: r.ae, total: 0, within: 0, preCall: 0, after: 0, never: 0, pending: 0 };
     const a = aeMap[r.ae];
     a.total++;
     if (r.bucket === "within") a.within++;
     else if (r.bucket === "after") a.after++;
     else if (r.bucket === "never") a.never++;
     else if (r.bucket === "pending") a.pending++;
+    if (r.preCall) a.preCall++;
   });
 
   const aeRows = Object.values(aeMap).map(a => {
@@ -237,12 +286,13 @@ function render() {
     let va, vb;
     switch (aeSortCol) {
       case 0: va = a.ae; vb = b.ae; break;
-      case 1: va = a.total; vb = b.total; break;
+      case 1: va = a.preCall; vb = b.preCall; break;
       case 2: va = a.within; vb = b.within; break;
       case 3: va = a.after; vb = b.after; break;
       case 4: va = a.never; vb = b.never; break;
       case 5: va = a.pending; vb = b.pending; break;
-      case 6: va = a.callRate ?? -1; vb = b.callRate ?? -1; break;
+      case 6: va = a.total; vb = b.total; break;
+      case 7: va = a.callRate ?? -1; vb = b.callRate ?? -1; break;
     }
     return typeof va === "string"
       ? (aeSortAsc ? va.localeCompare(vb) : vb.localeCompare(va))
@@ -253,11 +303,12 @@ function render() {
     const rateClass = a.callRate === null ? "" : a.callRate >= 50 ? "call-rate-good" : a.callRate >= 25 ? "call-rate-mid" : "call-rate-bad";
     return `<tr>
       <td>${a.ae}</td>
-      <td>${a.total}</td>
+      <td>${a.preCall}</td>
       <td>${a.within}</td>
       <td>${a.after}</td>
       <td>${a.never}</td>
       <td>${a.pending}</td>
+      <td>${a.total}</td>
       <td class="${rateClass}">${a.callRate !== null ? a.callRate + "%" : "--"}</td>
     </tr>`;
   }).join("");
@@ -300,6 +351,9 @@ function render() {
     const link = r.leadId
       ? `<a href="https://app.close.com/lead/${r.leadId}/" target="_blank" style="color:#6c5ce7;font-weight:700;text-decoration:none;font-size:15px;" title="Open in Close">&#8599;</a>`
       : `<span style="color:#b2bec3">&#8212;</span>`;
+    const preBadge = r.preCall
+      ? `<span class="badge-precall" title="Connected call within 30 min before status change">Pre-call</span>`
+      : "";
     return `<tr>
       <td><strong>${r.contact}</strong></td>
       <td>${r.ae}</td>
@@ -307,7 +361,7 @@ function render() {
       <td>${fmt(r.changedAt)}</td>
       <td>${fmt(r.callAt)}</td>
       <td>${r.minsToCall !== null ? r.minsToCall + " min" : "--"}</td>
-      <td><span class="badge ${r.bucket}">${bl}</span></td>
+      <td><span class="badge ${r.bucket}">${bl}</span>${preBadge}</td>
       <td style="text-align:center">${link}</td>
     </tr>`;
   }).join("");
