@@ -220,23 +220,27 @@ def fetch_transitions_parallel(api_key, lead_ids, start_date, end_date):
 # ── Step 2: Bulk-fetch all calls ──
 
 def fetch_all_calls_bulk(api_key, start_date, end_date):
-    """Bulk-fetch all calls in date range. Returns dict of lead_id → sorted list of call timestamps."""
+    """Bulk-fetch all calls in date range. Returns dict of lead_id → sorted list of call dicts."""
     print("Bulk-fetching all calls...")
     rows = _fetch_all_pages_parallel("activity/call/", {
         "date_created__gte": start_date,
         "date_created__lte": end_date,
         "_order_by": "date_created",
-        "_fields": "lead_id,date_created",
+        "_fields": "lead_id,date_created,duration,status",
     }, api_key, label="calls")
     return _calls_rows_to_dict(rows)
 
 
 def _calls_rows_to_dict(rows):
-    """Convert raw call rows to {lead_id: [timestamps]} dict."""
+    """Convert raw call rows to {lead_id: [{ts, dur, st}]} dict."""
     all_calls = {}
     for call in rows:
         lid = call["lead_id"]
-        all_calls.setdefault(lid, []).append(call["date_created"])
+        all_calls.setdefault(lid, []).append({
+            "ts": call["date_created"],
+            "dur": call.get("duration", 0),
+            "st": call.get("status", ""),
+        })
     print(f"  Cached {len(rows)} calls across {len(all_calls)} leads")
     return all_calls
 
@@ -248,7 +252,7 @@ def fetch_calls_chunk(api_key, start_date, end_date, skip_from=0, max_pages=25):
         "date_created__gte": start_date,
         "date_created__lte": end_date,
         "_order_by": "date_created",
-        "_fields": "lead_id,date_created",
+        "_fields": "lead_id,date_created,duration,status",
         "_limit": 100,
     }
     spec_skips = [skip_from + i * 100 for i in range(max_pages)]
@@ -285,10 +289,27 @@ def find_earliest_call(bulk_calls, lead_id, after_timestamp):
     if not calls:
         return None
     after_dt = datetime.fromisoformat(after_timestamp.replace("Z", "+00:00"))
-    for call_ts in sorted(calls):
-        call_dt = datetime.fromisoformat(call_ts.replace("Z", "+00:00"))
+    for c in sorted(calls, key=lambda x: x["ts"]):
+        call_dt = datetime.fromisoformat(c["ts"].replace("Z", "+00:00"))
         if call_dt >= after_dt:
-            return call_ts
+            return c["ts"]
+    return None
+
+
+def find_pre_trigger_call(bulk_calls, lead_id, changed_at_str):
+    """Find a connected call in the 30-min window before the status change, using bulk data.
+    Connected = duration > 0 AND status == 'completed' (Close's 'answered')."""
+    calls = bulk_calls.get(lead_id, [])
+    if not calls:
+        return None
+    changed_at = datetime.fromisoformat(changed_at_str.replace("Z", "+00:00"))
+    window_start = changed_at - timedelta(minutes=30)
+    for c in sorted(calls, key=lambda x: x["ts"]):
+        call_dt = datetime.fromisoformat(c["ts"].replace("Z", "+00:00"))
+        if call_dt >= changed_at:
+            continue
+        if call_dt >= window_start and c.get("dur", 0) > 0 and c.get("st") == "completed":
+            return c["ts"]
     return None
 
 
@@ -337,39 +358,6 @@ def fetch_lead_infos_parallel(api_key, lead_ids):
     return results
 
 
-def fetch_pre_trigger_call(api_key, lead_id, changed_at_str):
-    """
-    Find the earliest *connected* call on a lead in the 30-minute window
-    immediately before the status change.
-    Connected = duration > 0 AND status == "completed" (Close's "answered").
-    """
-    changed_at = datetime.fromisoformat(changed_at_str.replace("Z", "+00:00"))
-    window_start = (changed_at - timedelta(minutes=30)).isoformat()
-    try:
-        data = close_get(
-            "activity/call/",
-            params={
-                "lead_id": lead_id,
-                "date_created__gte": window_start,
-                "date_created__lte": changed_at_str,
-                "_order_by": "date_created",
-                "_limit": 50,
-                "_fields": "date_created,duration,status",
-            },
-            api_key=api_key,
-        )
-        for call in data.get("data", []):
-            ts = call["date_created"]
-            if datetime.fromisoformat(ts.replace("Z", "+00:00")) >= changed_at:
-                continue
-            if call.get("duration", 0) > 0 and call.get("status") == "completed":
-                return ts
-        return None
-    except Exception as e:
-        print(f"  Warning: Could not fetch pre-trigger calls for lead {lead_id}: {e}")
-        return None
-
-
 # ── Step 4: Users ──
 
 def fetch_users(api_key):
@@ -411,7 +399,7 @@ def classify(changed_at_str, call_at_str, pre_call_at_str, now):
 
 # ── Processing helpers ──
 
-def process_transitions(api_key, transitions, bulk_calls, lead_infos, users, now):
+def process_transitions(transitions, bulk_calls, lead_infos, users, now):
     """Classify transitions using pre-fetched bulk data."""
     results = []
     seen_keys = set()
@@ -427,7 +415,7 @@ def process_transitions(api_key, transitions, bulk_calls, lead_infos, users, now
             "lead_name": "(Unknown)", "contact_name": "(Unknown)", "user_id": None
         })
         call_at = find_earliest_call(bulk_calls, lead_id, changed_at)
-        pre_call_at = fetch_pre_trigger_call(api_key, lead_id, changed_at)
+        pre_call_at = find_pre_trigger_call(bulk_calls, lead_id, changed_at)
         bucket, mins_to_call = classify(changed_at, call_at, pre_call_at, now)
 
         ae_user_id = lead_info.get("user_id") or t.get("user_id")
@@ -531,7 +519,7 @@ def main():
     lead_infos = fetch_lead_infos_parallel(api_key, transition_lead_ids)
 
     # Step 4: Classify
-    results = process_transitions(api_key, transitions, bulk_calls, lead_infos, users, now)
+    results = process_transitions(transitions, bulk_calls, lead_infos, users, now)
 
     # Step 5: Build snapshot and write to Supabase
     snapshot = build_snapshot(results, start_date, end_date, now, range_type)

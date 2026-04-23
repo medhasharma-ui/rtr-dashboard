@@ -38,7 +38,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from supabase import create_client
 
 from pull_data import (
-    close_get,
     fetch_calls_chunk,
     fetch_lead_ids,
     fetch_lead_infos_parallel,
@@ -273,7 +272,7 @@ def do_batch(sb, api_key, state, mode="mtd"):
 
     # Classify using pre-fetched bulk calls
     t0 = time.time()
-    batch_results = process_transitions(api_key, transitions, bulk_calls, lead_infos, users, now)
+    batch_results = process_transitions(transitions, bulk_calls, lead_infos, users, now)
     results.extend(batch_results)
     print(f"[batch] classify: {time.time()-t0:.1f}s → {len(batch_results)} results")
 
