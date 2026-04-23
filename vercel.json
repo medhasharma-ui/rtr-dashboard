@@ -6,8 +6,5 @@
   },
   "rewrites": [
     { "source": "/(.*)", "destination": "/$1" }
-  ],
-  "crons": [
-    { "path": "/api/cron?reset=1", "schedule": "0 */6 * * *" }
   ]
 }
