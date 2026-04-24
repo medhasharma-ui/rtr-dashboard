@@ -162,4 +162,11 @@ def query_dashboard(start_date, end_date, range_type="custom"):
             "transition": transition,
         })
 
-    return build_snapshot(results, start_date, end_date, now, range_type)
+    snapshot = build_snapshot(results, start_date, end_date, now, range_type)
+    snapshot["_debug"] = {
+        "start_utc": start_utc,
+        "end_utc": end_utc,
+        "osc_count": len(osc_rows),
+        "results_count": len(results),
+    }
+    return snapshot
