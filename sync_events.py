@@ -89,16 +89,20 @@ def fetch_recent_calls(api_key, since_date):
     return rows
 
 
-def main():
-    api_key = get_api_key()
+def run_sync(api_key=None):
+    """Run incremental sync. Returns a result dict.
+
+    Can be called from CLI (main) or from the api/sync.py endpoint.
+    """
+    if not api_key:
+        api_key = get_api_key()
     sb = get_supabase()
     now = datetime.now(timezone.utc)
 
     # Read sync cursor
     cursor = get_sync_cursor(sb, entity_type="event_log")
     if not cursor:
-        print("Error: No sync cursor found. Run initial_load.py first.")
-        sys.exit(1)
+        return {"error": "No sync cursor found. Run initial_load.py first."}
 
     last_sync = cursor["last_event_date"]
     print(f"=== Incremental Sync ===")
@@ -189,11 +193,29 @@ def main():
 
     elapsed = round(time.time() - t_total, 1)
     print(f"\n=== Sync complete in {elapsed}s ===")
-    print(f"  Opportunities: {len(raw_opps)}")
-    print(f"  Status changes: {len(changes)}")
-    print(f"  Calls: {len(call_rows)}")
-    print(f"  New leads: {len(missing)}")
-    print(f"  Cursor: {now.isoformat()}")
+
+    return {
+        "status": "ok",
+        "elapsed_s": elapsed,
+        "last_sync": last_sync,
+        "new_cursor": now.isoformat(),
+        "opportunities": len(raw_opps),
+        "status_changes": len(changes),
+        "calls": len(call_rows),
+        "new_leads": len(missing),
+    }
+
+
+def main():
+    result = run_sync()
+    if result.get("error"):
+        print(f"Error: {result['error']}")
+        sys.exit(1)
+    print(f"  Opportunities: {result['opportunities']}")
+    print(f"  Status changes: {result['status_changes']}")
+    print(f"  Calls: {result['calls']}")
+    print(f"  New leads: {result['new_leads']}")
+    print(f"  Cursor: {result['new_cursor']}")
 
 
 if __name__ == "__main__":
