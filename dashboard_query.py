@@ -33,13 +33,25 @@ def _get_supabase():
 
 
 def _chunked_in_query(sb, table, column, ids, select="*"):
-    """Query with .in_() in chunks to avoid PostgREST limits."""
+    """Query with .in_() in chunks, paginating each to avoid PostgREST row limits."""
     all_rows = []
     id_list = list(ids)
+    page_size = 1000
     for i in range(0, len(id_list), QUERY_CHUNK):
         chunk = id_list[i : i + QUERY_CHUNK]
-        rows = sb.table(table).select(select).in_(column, chunk).execute()
-        all_rows.extend(rows.data)
+        offset = 0
+        while True:
+            page = (
+                sb.table(table)
+                .select(select)
+                .in_(column, chunk)
+                .range(offset, offset + page_size - 1)
+                .execute()
+            )
+            all_rows.extend(page.data)
+            if len(page.data) < page_size:
+                break
+            offset += page_size
     return all_rows
 
 
@@ -67,17 +79,27 @@ def query_dashboard(start_date, end_date, range_type="custom"):
     )
     end_utc = end_pt.astimezone(timezone.utc).isoformat()
 
-    # 1. Query opportunity_status_changes: RTR ��� target statuses in date range
-    query = (
-        sb.table("opportunity_status_changes")
-        .select("*")
-        .eq("old_status_id", RTR_STATUS_ID)
-        .in_("new_status_id", target_status_ids)
-        .gte("changed_at", start_utc)
-        .lte("changed_at", end_utc)
-        .order("changed_at")
-    )
-    osc_rows = query.execute().data
+    # 1. Query opportunity_status_changes: RTR → target statuses in date range
+    #    Paginate to avoid PostgREST default 1000-row limit.
+    osc_rows = []
+    page_size = 1000
+    offset = 0
+    while True:
+        page = (
+            sb.table("opportunity_status_changes")
+            .select("*")
+            .eq("old_status_id", RTR_STATUS_ID)
+            .in_("new_status_id", target_status_ids)
+            .gte("changed_at", start_utc)
+            .lte("changed_at", end_utc)
+            .order("changed_at")
+            .range(offset, offset + page_size - 1)
+            .execute()
+        )
+        osc_rows.extend(page.data)
+        if len(page.data) < page_size:
+            break
+        offset += page_size
 
     if not osc_rows:
         return build_snapshot([], start_date, end_date, now, range_type)
@@ -162,11 +184,4 @@ def query_dashboard(start_date, end_date, range_type="custom"):
             "transition": transition,
         })
 
-    snapshot = build_snapshot(results, start_date, end_date, now, range_type)
-    snapshot["_debug"] = {
-        "start_utc": start_utc,
-        "end_utc": end_utc,
-        "osc_count": len(osc_rows),
-        "results_count": len(results),
-    }
-    return snapshot
+    return build_snapshot(results, start_date, end_date, now, range_type)
