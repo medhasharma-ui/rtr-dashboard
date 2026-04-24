@@ -46,6 +46,10 @@ def _chunked_in_query(sb, table, column, ids, select="*"):
 def query_dashboard(start_date, end_date, range_type="custom"):
     """Query relational tables and compute dashboard buckets.
 
+    start_date/end_date are PT date strings (YYYY-MM-DD). We convert to UTC
+    bounds so that records landing on e.g. April 23 PT (which may be April 24
+    UTC) are included correctly.
+
     Returns the same JSON shape as build_snapshot().
     """
     sb = _get_supabase()
@@ -53,14 +57,24 @@ def query_dashboard(start_date, end_date, range_type="custom"):
 
     target_status_ids = list(TARGET_STATUSES.keys())
 
-    # 1. Query opportunity_status_changes: RTR → target statuses in date range
+    # Convert PT date range → UTC bounds
+    # Start of start_date in PT → UTC
+    start_pt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=PT)
+    start_utc = start_pt.astimezone(timezone.utc).isoformat()
+    # End of end_date in PT (23:59:59) → UTC
+    end_pt = datetime.strptime(end_date, "%Y-%m-%d").replace(
+        hour=23, minute=59, second=59, tzinfo=PT
+    )
+    end_utc = end_pt.astimezone(timezone.utc).isoformat()
+
+    # 1. Query opportunity_status_changes: RTR ��� target statuses in date range
     query = (
         sb.table("opportunity_status_changes")
         .select("*")
         .eq("old_status_id", RTR_STATUS_ID)
         .in_("new_status_id", target_status_ids)
-        .gte("changed_at", start_date)
-        .lte("changed_at", f"{end_date}T23:59:59+00:00")
+        .gte("changed_at", start_utc)
+        .lte("changed_at", end_utc)
         .order("changed_at")
     )
     osc_rows = query.execute().data
