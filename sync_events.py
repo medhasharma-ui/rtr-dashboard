@@ -89,6 +89,49 @@ def fetch_recent_calls(api_key, since_date):
     return rows
 
 
+def fetch_calls_paginated(api_key, since_date, skip_from=0, max_pages=10):
+    """Fetch calls in parallel page chunks. Returns (rows, done, next_skip).
+
+    Fires up to `max_pages` pages in parallel starting from `skip_from`.
+    Returns early when a page has < 100 rows (end of data).
+    Used by api/sync.py to stay within the ~5s time budget per step.
+    """
+    base_params = {
+        "date_created__gte": since_date,
+        "_fields": "id,lead_id,user_id,date_created,duration,status",
+        "_limit": 100,
+    }
+    skips = [skip_from + i * 100 for i in range(max_pages)]
+    page_results = {}
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = {
+            executor.submit(close_get, "activity/call/",
+                            {**base_params, "_skip": skip}, api_key): skip
+            for skip in skips
+        }
+        for future in as_completed(futures):
+            skip = futures[future]
+            try:
+                data = future.result()
+                page_results[skip] = data.get("data", [])
+            except Exception:
+                page_results[skip] = []
+
+    rows = []
+    done = False
+    for skip in skips:
+        page_rows = page_results.get(skip, [])
+        rows.extend(page_rows)
+        if len(page_rows) < 100:
+            done = True
+            break
+
+    next_skip = skip_from + max_pages * 100
+    print(f"  [calls_paginated] skip={skip_from} pages={max_pages} → {len(rows)} rows, done={done}")
+    return rows, done, next_skip
+
+
 def run_sync(api_key=None):
     """Run incremental sync. Returns a result dict.
 

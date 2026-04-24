@@ -91,7 +91,7 @@ CLAUDE.md                          — this file
   - `opportunity_status_changes(id text PK, lead_id, opportunity_id, old_status_id, new_status_id, changed_at, user_id, synced_at)`
   - `calls(id text PK, lead_id, user_id, date_created, duration, status, synced_at)`
   - `sync_cursors(entity_type text PK, last_event_date, last_synced_at)`
-- **Legacy tables:** `dashboard_snapshots`, `cron_state`
+- **Legacy tables:** `dashboard_snapshots`, `cron_state` (also used by `/api/sync` state machine with `id='sync'`)
 - RLS: writes require secret key. Entity tables have anon read policies. `sync_cursors` is service-key only.
 - Secret key lives in GitHub Secrets and Vercel env vars.
 
@@ -124,5 +124,7 @@ Base URL: `https://api.close.com/api/v1/`
 - `GET /api/snapshot?source=snapshot` — dashboard data (legacy JSONB snapshot)
 - `GET /api/dashboard` — dashboard data (relational query, standalone)
 - `GET /api/dashboard?start=YYYY-MM-DD&end=YYYY-MM-DD` — custom date range
+- `GET /api/sync` — incremental sync step (state machine: idle→fetch_opps→fetch_changes→fetch_calls→fetch_leads→complete)
+- `GET /api/sync?reset=1` — force-start a new sync run
 - `GET /api/cron` — trigger legacy batch processing step
 - `GET /api/status` — legacy cron status
