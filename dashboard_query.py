@@ -6,6 +6,7 @@ from normalized Supabase tables.
 """
 
 import os
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -22,7 +23,7 @@ from pull_data import (
 
 PT = ZoneInfo("America/Los_Angeles")
 
-QUERY_CHUNK = 100
+QUERY_CHUNK = 500
 
 
 def _get_supabase():
@@ -32,8 +33,12 @@ def _get_supabase():
     )
 
 
-def _chunked_in_query(sb, table, column, ids, select="*"):
-    """Query with .in_() in chunks, paginating each to avoid PostgREST row limits."""
+def _chunked_in_query(sb, table, column, ids, select="*", extra_filters=None):
+    """Query with .in_() in chunks, paginating each to avoid PostgREST row limits.
+
+    extra_filters: list of (method, args) tuples to apply, e.g.
+        [("gte", ("date_created", "2026-04-01T00:00:00+00:00"))]
+    """
     all_rows = []
     id_list = list(ids)
     page_size = 1000
@@ -41,18 +46,46 @@ def _chunked_in_query(sb, table, column, ids, select="*"):
         chunk = id_list[i : i + QUERY_CHUNK]
         offset = 0
         while True:
-            page = (
+            q = (
                 sb.table(table)
                 .select(select)
                 .in_(column, chunk)
-                .range(offset, offset + page_size - 1)
-                .execute()
             )
+            if extra_filters:
+                for method, args in extra_filters:
+                    q = getattr(q, method)(*args)
+            page = q.range(offset, offset + page_size - 1).execute()
             all_rows.extend(page.data)
             if len(page.data) < page_size:
                 break
             offset += page_size
     return all_rows
+
+
+def _fetch_leads(sb, lead_ids):
+    """Fetch leads by IDs."""
+    return _chunked_in_query(sb, "leads", "id", lead_ids)
+
+
+def _fetch_calls(sb, lead_ids, calls_start):
+    """Fetch calls for leads, filtered by date in SQL."""
+    return _chunked_in_query(
+        sb, "calls", "lead_id", lead_ids,
+        select="lead_id,date_created,duration,status",
+        extra_filters=[("gte", ("date_created", calls_start))],
+    )
+
+
+def _fetch_users(sb):
+    """Fetch all users."""
+    return sb.table("users").select("id,name").execute().data
+
+
+def _fetch_opportunities(sb, opp_ids):
+    """Fetch opportunities by IDs."""
+    return _chunked_in_query(
+        sb, "opportunities", "id", opp_ids, select="id,lead_id,user_id"
+    )
 
 
 def query_dashboard(start_date, end_date, range_type="custom"):
@@ -70,17 +103,14 @@ def query_dashboard(start_date, end_date, range_type="custom"):
     target_status_ids = list(TARGET_STATUSES.keys())
 
     # Convert PT date range → UTC bounds
-    # Start of start_date in PT → UTC
     start_pt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=PT)
     start_utc = start_pt.astimezone(timezone.utc).isoformat()
-    # End of end_date in PT (23:59:59) → UTC
     end_pt = datetime.strptime(end_date, "%Y-%m-%d").replace(
         hour=23, minute=59, second=59, tzinfo=PT
     )
     end_utc = end_pt.astimezone(timezone.utc).isoformat()
 
     # 1. Query opportunity_status_changes: RTR → target statuses in date range
-    #    Paginate to avoid PostgREST default 1000-row limit.
     osc_rows = []
     page_size = 1000
     offset = 0
@@ -113,21 +143,28 @@ def query_dashboard(start_date, end_date, range_type="custom"):
         if row.get("opportunity_id"):
             opp_ids.add(row["opportunity_id"])
 
-    # 3. Fetch related data
-    leads_data = _chunked_in_query(sb, "leads", "id", lead_ids)
-    leads_map = {l["id"]: l for l in leads_data}
-
-    # Fetch calls for these leads — include 30-min buffer before earliest transition
+    # Compute calls date filter (30-min buffer before earliest transition)
     earliest_change = min(row["changed_at"] for row in osc_rows)
     earliest_dt = datetime.fromisoformat(earliest_change.replace("Z", "+00:00"))
     calls_start = (earliest_dt - timedelta(minutes=30)).isoformat()
-    calls_rows = _chunked_in_query(
-        sb, "calls", "lead_id", lead_ids,
-        select="lead_id,date_created,duration,status"
-    )
+
+    # 3. Fetch leads, calls, users, opportunities — all in parallel
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        f_leads = executor.submit(_fetch_leads, sb, lead_ids)
+        f_calls = executor.submit(_fetch_calls, sb, lead_ids, calls_start)
+        f_users = executor.submit(_fetch_users, sb)
+        f_opps = executor.submit(_fetch_opportunities, sb, opp_ids)
+
+        leads_data = f_leads.result()
+        calls_rows = f_calls.result()
+        users_rows = f_users.result()
+        opps_data = f_opps.result()
+
+    leads_map = {l["id"]: l for l in leads_data}
+
     bulk_calls = {}
     for c in calls_rows:
-        if c["date_created"] and c["date_created"] >= calls_start:
+        if c["date_created"]:
             lid = c["lead_id"]
             bulk_calls.setdefault(lid, []).append({
                 "ts": c["date_created"],
@@ -135,12 +172,8 @@ def query_dashboard(start_date, end_date, range_type="custom"):
                 "st": c.get("status", ""),
             })
 
-    # Fetch users
-    users_rows = sb.table("users").select("id,name").execute().data
     users_map = {u["id"]: u["name"] for u in users_rows}
 
-    # Fetch opportunities for AE assignment
-    opps_data = _chunked_in_query(sb, "opportunities", "id", opp_ids, select="id,lead_id,user_id")
     lead_ae_map = {}
     for opp in opps_data:
         lid = opp.get("lead_id")
