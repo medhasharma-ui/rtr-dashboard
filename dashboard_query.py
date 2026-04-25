@@ -23,7 +23,7 @@ from pull_data import (
 
 PT = ZoneInfo("America/Los_Angeles")
 
-QUERY_CHUNK = 500
+QUERY_CHUNK = 100
 
 
 def _get_supabase():
@@ -33,12 +33,8 @@ def _get_supabase():
     )
 
 
-def _chunked_in_query(sb, table, column, ids, select="*", extra_filters=None):
-    """Query with .in_() in chunks, paginating each to avoid PostgREST row limits.
-
-    extra_filters: list of (method, args) tuples to apply, e.g.
-        [("gte", ("date_created", "2026-04-01T00:00:00+00:00"))]
-    """
+def _chunked_in_query(sb, table, column, ids, select="*"):
+    """Query with .in_() in chunks, paginating each to avoid PostgREST row limits."""
     all_rows = []
     id_list = list(ids)
     page_size = 1000
@@ -46,15 +42,13 @@ def _chunked_in_query(sb, table, column, ids, select="*", extra_filters=None):
         chunk = id_list[i : i + QUERY_CHUNK]
         offset = 0
         while True:
-            q = (
+            page = (
                 sb.table(table)
                 .select(select)
                 .in_(column, chunk)
+                .range(offset, offset + page_size - 1)
+                .execute()
             )
-            if extra_filters:
-                for method, args in extra_filters:
-                    q = getattr(q, method)(*args)
-            page = q.range(offset, offset + page_size - 1).execute()
             all_rows.extend(page.data)
             if len(page.data) < page_size:
                 break
@@ -68,13 +62,12 @@ def _fetch_leads(lead_ids):
     return _chunked_in_query(sb, "leads", "id", lead_ids)
 
 
-def _fetch_calls(lead_ids, calls_start):
-    """Fetch calls for leads, filtered by date in SQL."""
+def _fetch_calls(lead_ids):
+    """Fetch calls for leads."""
     sb = _get_supabase()
     return _chunked_in_query(
         sb, "calls", "lead_id", lead_ids,
         select="lead_id,date_created,duration,status",
-        extra_filters=[("gte", ("date_created", calls_start))],
     )
 
 
@@ -156,7 +149,7 @@ def query_dashboard(start_date, end_date, range_type="custom"):
     #    Each thread gets its own Supabase client (httpx is not thread-safe).
     with ThreadPoolExecutor(max_workers=4) as executor:
         f_leads = executor.submit(_fetch_leads, lead_ids)
-        f_calls = executor.submit(_fetch_calls, lead_ids, calls_start)
+        f_calls = executor.submit(_fetch_calls, lead_ids)
         f_users = executor.submit(_fetch_users)
         f_opps = executor.submit(_fetch_opportunities, opp_ids)
 
@@ -169,7 +162,7 @@ def query_dashboard(start_date, end_date, range_type="custom"):
 
     bulk_calls = {}
     for c in calls_rows:
-        if c["date_created"]:
+        if c["date_created"] and c["date_created"] >= calls_start:
             lid = c["lead_id"]
             bulk_calls.setdefault(lid, []).append({
                 "ts": c["date_created"],
