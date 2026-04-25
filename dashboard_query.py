@@ -62,13 +62,15 @@ def _chunked_in_query(sb, table, column, ids, select="*", extra_filters=None):
     return all_rows
 
 
-def _fetch_leads(sb, lead_ids):
+def _fetch_leads(lead_ids):
     """Fetch leads by IDs."""
+    sb = _get_supabase()
     return _chunked_in_query(sb, "leads", "id", lead_ids)
 
 
-def _fetch_calls(sb, lead_ids, calls_start):
+def _fetch_calls(lead_ids, calls_start):
     """Fetch calls for leads, filtered by date in SQL."""
+    sb = _get_supabase()
     return _chunked_in_query(
         sb, "calls", "lead_id", lead_ids,
         select="lead_id,date_created,duration,status",
@@ -76,13 +78,15 @@ def _fetch_calls(sb, lead_ids, calls_start):
     )
 
 
-def _fetch_users(sb):
+def _fetch_users():
     """Fetch all users."""
+    sb = _get_supabase()
     return sb.table("users").select("id,name").execute().data
 
 
-def _fetch_opportunities(sb, opp_ids):
+def _fetch_opportunities(opp_ids):
     """Fetch opportunities by IDs."""
+    sb = _get_supabase()
     return _chunked_in_query(
         sb, "opportunities", "id", opp_ids, select="id,lead_id,user_id"
     )
@@ -149,11 +153,12 @@ def query_dashboard(start_date, end_date, range_type="custom"):
     calls_start = (earliest_dt - timedelta(minutes=30)).isoformat()
 
     # 3. Fetch leads, calls, users, opportunities — all in parallel
+    #    Each thread gets its own Supabase client (httpx is not thread-safe).
     with ThreadPoolExecutor(max_workers=4) as executor:
-        f_leads = executor.submit(_fetch_leads, sb, lead_ids)
-        f_calls = executor.submit(_fetch_calls, sb, lead_ids, calls_start)
-        f_users = executor.submit(_fetch_users, sb)
-        f_opps = executor.submit(_fetch_opportunities, sb, opp_ids)
+        f_leads = executor.submit(_fetch_leads, lead_ids)
+        f_calls = executor.submit(_fetch_calls, lead_ids, calls_start)
+        f_users = executor.submit(_fetch_users)
+        f_opps = executor.submit(_fetch_opportunities, opp_ids)
 
         leads_data = f_leads.result()
         calls_rows = f_calls.result()
