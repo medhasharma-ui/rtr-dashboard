@@ -112,6 +112,9 @@ CREATE INDEX IF NOT EXISTS idx_calls_lead_id
 CREATE INDEX IF NOT EXISTS idx_calls_date_created
   ON calls (date_created);
 
+CREATE INDEX IF NOT EXISTS idx_calls_lead_date
+  ON calls (lead_id, date_created);
+
 
 -- 6. sync_cursors — tracks incremental sync position
 CREATE TABLE IF NOT EXISTS sync_cursors (

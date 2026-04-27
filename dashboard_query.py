@@ -2,91 +2,102 @@
 Shared dashboard query logic for relational tables.
 
 Used by both api/dashboard.py and api/snapshot.py to compute dashboard JSON
-from normalized Supabase tables.
+from normalized Supabase tables via direct Postgres connection (psycopg2).
 """
 
 import os
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from supabase import create_client
+import psycopg2
+import psycopg2.extras
 
-from pull_data import (
-    classify,
-    build_snapshot,
-    find_earliest_call,
-    find_pre_trigger_call,
-    RTR_STATUS_ID,
-    TARGET_STATUSES,
-)
+from pull_data import build_snapshot
 
 PT = ZoneInfo("America/Los_Angeles")
 
-QUERY_CHUNK = 100
+RTR_STATUS_ID = "stat_AZ0tc4F8UzLQJyVG9vLH23R5RpMnIZdUkiNH7xvvVeb"
+TARGET_STATUS_IDS = [
+    "stat_Pn5zo8keGKa8rK4QCbg1sQAt72vREwPDPcZ9MyXv9Wf",  # Active Scenario
+    "stat_ES08dw9Ij4gVsMrcuCtmviVwlJ0COaYJIrUgJtBWEtk",  # Declined Scenario
+    "stat_RIXpsfGd3QDdTzdYQU16XLVaj1M6h4X6JV8qsZ8d7tW",  # Addl Info Needed
+]
 
-
-def _get_supabase():
-    return create_client(
-        os.environ["SUPABASE_URL"],
-        os.environ["SUPABASE_SECRET_KEY"],
-    )
-
-
-def _chunked_in_query(sb, table, column, ids, select="*"):
-    """Query with .in_() in chunks, paginating each to avoid PostgREST row limits."""
-    all_rows = []
-    id_list = list(ids)
-    page_size = 1000
-    for i in range(0, len(id_list), QUERY_CHUNK):
-        chunk = id_list[i : i + QUERY_CHUNK]
-        offset = 0
-        while True:
-            page = (
-                sb.table(table)
-                .select(select)
-                .in_(column, chunk)
-                .range(offset, offset + page_size - 1)
-                .execute()
-            )
-            all_rows.extend(page.data)
-            if len(page.data) < page_size:
-                break
-            offset += page_size
-    return all_rows
-
-
-def _fetch_leads(lead_ids):
-    """Fetch leads by IDs."""
-    sb = _get_supabase()
-    return _chunked_in_query(sb, "leads", "id", lead_ids)
-
-
-def _fetch_calls(lead_ids):
-    """Fetch calls for leads."""
-    sb = _get_supabase()
-    return _chunked_in_query(
-        sb, "calls", "lead_id", lead_ids,
-        select="lead_id,date_created,duration,status",
-    )
-
-
-def _fetch_users():
-    """Fetch all users."""
-    sb = _get_supabase()
-    return sb.table("users").select("id,name").execute().data
-
-
-def _fetch_opportunities(opp_ids):
-    """Fetch opportunities by IDs."""
-    sb = _get_supabase()
-    return _chunked_in_query(
-        sb, "opportunities", "id", opp_ids, select="id,lead_id,user_id"
-    )
+DASHBOARD_SQL = """
+WITH osc AS (
+    SELECT DISTINCT ON (lead_id, changed_at)
+        id, lead_id, opportunity_id, new_status_id, changed_at, user_id
+    FROM opportunity_status_changes
+    WHERE old_status_id = %(rtr_status)s
+      AND new_status_id = ANY(%(target_statuses)s)
+      AND changed_at >= %(start_utc)s
+      AND changed_at <= %(end_utc)s
+    ORDER BY lead_id, changed_at
+)
+SELECT
+    COALESCE(l.contact_name, l.display_name, '(Unknown)') AS contact,
+    COALESCE(u.name, 'Unknown') AS ae,
+    osc.changed_at AS "changedAt",
+    post_call.date_created AS "callAt",
+    pre_call.date_created AS "preCallAt",
+    (pre_call.date_created IS NOT NULL) AS "preCall",
+    CASE
+        WHEN post_call.date_created IS NOT NULL THEN
+            ROUND(EXTRACT(EPOCH FROM (post_call.date_created - osc.changed_at)) / 60.0, 1)
+        ELSE NULL
+    END AS "minsToCall",
+    CASE
+        WHEN post_call.date_created IS NOT NULL AND (
+            pre_call.date_created IS NOT NULL
+            OR EXTRACT(EPOCH FROM (post_call.date_created - osc.changed_at)) / 60.0 <= 120
+        ) THEN 'within'
+        WHEN post_call.date_created IS NOT NULL THEN 'after'
+        WHEN pre_call.date_created IS NOT NULL THEN 'within'
+        WHEN EXTRACT(EPOCH FROM (%(now)s - osc.changed_at)) / 60.0 < 120 THEN 'pending'
+        ELSE 'never'
+    END AS bucket,
+    osc.lead_id AS "leadId",
+    osc.opportunity_id AS "opportunityId",
+    CASE osc.new_status_id
+        WHEN 'stat_Pn5zo8keGKa8rK4QCbg1sQAt72vREwPDPcZ9MyXv9Wf' THEN 'Active Scenario'
+        WHEN 'stat_ES08dw9Ij4gVsMrcuCtmviVwlJ0COaYJIrUgJtBWEtk' THEN 'Declined Scenario'
+        WHEN 'stat_RIXpsfGd3QDdTzdYQU16XLVaj1M6h4X6JV8qsZ8d7tW' THEN 'Addl Info Needed'
+        ELSE 'Active Scenario'
+    END AS transition
+FROM osc
+LEFT JOIN leads l ON l.id = osc.lead_id
+LEFT JOIN LATERAL (
+    SELECT o.user_id
+    FROM opportunities o
+    WHERE o.id = osc.opportunity_id
+    LIMIT 1
+) opp ON true
+LEFT JOIN users u ON u.id = COALESCE(opp.user_id, osc.user_id)
+LEFT JOIN LATERAL (
+    SELECT c.date_created
+    FROM calls c
+    WHERE c.lead_id = osc.lead_id
+      AND c.date_created >= osc.changed_at
+    ORDER BY c.date_created
+    LIMIT 1
+) post_call ON true
+LEFT JOIN LATERAL (
+    SELECT c.date_created
+    FROM calls c
+    WHERE c.lead_id = osc.lead_id
+      AND c.date_created < osc.changed_at
+      AND c.date_created >= osc.changed_at - INTERVAL '30 minutes'
+      AND c.duration > 0
+      AND c.status = 'completed'
+    ORDER BY c.date_created
+    LIMIT 1
+) pre_call ON true
+ORDER BY osc.changed_at
+"""
 
 
 def query_dashboard(start_date, end_date, range_type="custom"):
-    """Query relational tables and compute dashboard buckets.
+    """Query relational tables via direct Postgres and compute dashboard buckets.
 
     start_date/end_date are PT date strings (YYYY-MM-DD). We convert to UTC
     bounds so that records landing on e.g. April 23 PT (which may be April 24
@@ -94,125 +105,38 @@ def query_dashboard(start_date, end_date, range_type="custom"):
 
     Returns the same JSON shape as build_snapshot().
     """
-    sb = _get_supabase()
     now = datetime.now(timezone.utc)
-
-    target_status_ids = list(TARGET_STATUSES.keys())
 
     # Convert PT date range → UTC bounds
     start_pt = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=PT)
-    start_utc = start_pt.astimezone(timezone.utc).isoformat()
+    start_utc = start_pt.astimezone(timezone.utc)
     end_pt = datetime.strptime(end_date, "%Y-%m-%d").replace(
         hour=23, minute=59, second=59, tzinfo=PT
     )
-    end_utc = end_pt.astimezone(timezone.utc).isoformat()
+    end_utc = end_pt.astimezone(timezone.utc)
 
-    # 1. Query opportunity_status_changes: RTR → target statuses in date range
-    osc_rows = []
-    page_size = 1000
-    offset = 0
-    while True:
-        page = (
-            sb.table("opportunity_status_changes")
-            .select("*")
-            .eq("old_status_id", RTR_STATUS_ID)
-            .in_("new_status_id", target_status_ids)
-            .gte("changed_at", start_utc)
-            .lte("changed_at", end_utc)
-            .order("changed_at")
-            .range(offset, offset + page_size - 1)
-            .execute()
-        )
-        osc_rows.extend(page.data)
-        if len(page.data) < page_size:
-            break
-        offset += page_size
-
-    if not osc_rows:
-        return build_snapshot([], start_date, end_date, now, range_type)
-
-    # 2. Collect unique lead_ids and opportunity_ids
-    lead_ids = set()
-    opp_ids = set()
-    for row in osc_rows:
-        if row.get("lead_id"):
-            lead_ids.add(row["lead_id"])
-        if row.get("opportunity_id"):
-            opp_ids.add(row["opportunity_id"])
-
-    # Compute calls date filter (30-min buffer before earliest transition)
-    earliest_change = min(row["changed_at"] for row in osc_rows)
-    earliest_dt = datetime.fromisoformat(earliest_change.replace("Z", "+00:00"))
-    calls_start = (earliest_dt - timedelta(minutes=30)).isoformat()
-
-    # 3. Fetch leads, calls, users, opportunities — all in parallel
-    #    Each thread gets its own Supabase client (httpx is not thread-safe).
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        f_leads = executor.submit(_fetch_leads, lead_ids)
-        f_calls = executor.submit(_fetch_calls, lead_ids)
-        f_users = executor.submit(_fetch_users)
-        f_opps = executor.submit(_fetch_opportunities, opp_ids)
-
-        leads_data = f_leads.result()
-        calls_rows = f_calls.result()
-        users_rows = f_users.result()
-        opps_data = f_opps.result()
-
-    leads_map = {l["id"]: l for l in leads_data}
-
-    bulk_calls = {}
-    for c in calls_rows:
-        if c["date_created"] and c["date_created"] >= calls_start:
-            lid = c["lead_id"]
-            bulk_calls.setdefault(lid, []).append({
-                "ts": c["date_created"],
-                "dur": c.get("duration", 0),
-                "st": c.get("status", ""),
+    conn = psycopg2.connect(os.environ["DATABASE_URL"])
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(DASHBOARD_SQL, {
+                "rtr_status": RTR_STATUS_ID,
+                "target_statuses": TARGET_STATUS_IDS,
+                "start_utc": start_utc,
+                "end_utc": end_utc,
+                "now": now,
             })
+            rows = cur.fetchall()
+    finally:
+        conn.close()
 
-    users_map = {u["id"]: u["name"] for u in users_rows}
-
-    lead_ae_map = {}
-    for opp in opps_data:
-        lid = opp.get("lead_id")
-        uid = opp.get("user_id")
-        if lid and uid and lid not in lead_ae_map:
-            lead_ae_map[lid] = uid
-
-    # 4. Classify each transition
+    # Convert datetime/Decimal objects to JSON-serializable types
     results = []
-    seen_keys = set()
-    for row in osc_rows:
-        lead_id = row["lead_id"]
-        changed_at = row["changed_at"]
-        key = f"{lead_id}_{changed_at}"
-        if key in seen_keys:
-            continue
-        seen_keys.add(key)
-
-        lead = leads_map.get(lead_id, {})
-        call_at = find_earliest_call(bulk_calls, lead_id, changed_at)
-        pre_call_at = find_pre_trigger_call(bulk_calls, lead_id, changed_at)
-        bucket, mins_to_call = classify(changed_at, call_at, pre_call_at, now)
-
-        ae_user_id = lead_ae_map.get(lead_id) or row.get("user_id")
-        ae_name = users_map.get(ae_user_id, "Unknown")
-
-        new_status_id = row.get("new_status_id")
-        transition = TARGET_STATUSES.get(new_status_id, "Active Scenario")
-
-        results.append({
-            "contact": lead.get("contact_name") or lead.get("display_name") or "(Unknown)",
-            "ae": ae_name,
-            "changedAt": changed_at,
-            "callAt": call_at,
-            "preCallAt": pre_call_at,
-            "preCall": bool(pre_call_at),
-            "minsToCall": mins_to_call,
-            "bucket": bucket,
-            "leadId": lead_id,
-            "opportunityId": row.get("opportunity_id"),
-            "transition": transition,
-        })
+    for row in rows:
+        r = dict(row)
+        r["changedAt"] = r["changedAt"].isoformat() if r["changedAt"] else None
+        r["callAt"] = r["callAt"].isoformat() if r["callAt"] else None
+        r["preCallAt"] = r["preCallAt"].isoformat() if r["preCallAt"] else None
+        r["minsToCall"] = float(r["minsToCall"]) if r["minsToCall"] is not None else None
+        results.append(r)
 
     return build_snapshot(results, start_date, end_date, now, range_type)
