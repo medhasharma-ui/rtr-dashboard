@@ -106,9 +106,9 @@ class handler(BaseHTTPRequestHandler):
                     end_date = end_param
                     range_type = "custom"
                 else:
-                    start_date = pt_now.replace(day=1).strftime("%Y-%m-%d")
+                    start_date = (pt_now - timedelta(days=30)).strftime("%Y-%m-%d")
                     end_date = pt_now.strftime("%Y-%m-%d")
-                    range_type = "mtd"
+                    range_type = "last30"
 
                 result = query_dashboard(start_date, end_date, range_type)
 
