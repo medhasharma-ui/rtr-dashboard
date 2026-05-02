@@ -13,7 +13,7 @@ from http.server import BaseHTTPRequestHandler
 import json
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
 
@@ -39,14 +39,14 @@ class handler(BaseHTTPRequestHandler):
                 start_date = start_param
                 end_date = end_param
                 range_type = "custom"
-            elif range_param == "mtd" or (not start_param and not end_param):
+            elif range_param == "mtd":
                 start_date = pt_now.replace(day=1).strftime("%Y-%m-%d")
                 end_date = pt_now.strftime("%Y-%m-%d")
                 range_type = "mtd"
             else:
-                start_date = pt_now.replace(day=1).strftime("%Y-%m-%d")
+                start_date = (pt_now - timedelta(days=30)).strftime("%Y-%m-%d")
                 end_date = pt_now.strftime("%Y-%m-%d")
-                range_type = "mtd"
+                range_type = "last30"
 
             result = query_dashboard(start_date, end_date, range_type)
             self._json(200, result)
