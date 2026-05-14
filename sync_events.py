@@ -81,9 +81,15 @@ def _fetch_status_changes(api_key, lead_id, since_date):
 
 
 def fetch_recent_calls(api_key, since_date):
-    """Fetch calls created since last sync via bulk endpoint."""
+    """Fetch calls created or updated since last sync via bulk endpoint.
+
+    Filters on date_updated, not date_created: a call is first synced while
+    still 'in-progress' (duration 0), then completes minutes later. Filtering
+    on date_created would never re-fetch it, leaving a stale row forever.
+    date_updated advances when the call completes, so this catches the update.
+    """
     rows = _fetch_all_pages_parallel("activity/call/", {
-        "date_created__gte": since_date,
+        "date_updated__gte": since_date,
         "_fields": "id,lead_id,user_id,date_created,duration,status",
     }, api_key, label="calls")
     return rows
@@ -95,9 +101,12 @@ def fetch_calls_paginated(api_key, since_date, skip_from=0, max_pages=10):
     Fires up to `max_pages` pages in parallel starting from `skip_from`.
     Returns early when a page has < 100 rows (end of data).
     Used by api/sync.py to stay within the ~5s time budget per step.
+
+    Filters on date_updated (see fetch_recent_calls) so calls that completed
+    after their initial in-progress sync get re-fetched.
     """
     base_params = {
-        "date_created__gte": since_date,
+        "date_updated__gte": since_date,
         "_fields": "id,lead_id,user_id,date_created,duration,status",
         "_limit": 100,
     }
