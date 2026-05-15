@@ -80,19 +80,64 @@ def _fetch_status_changes(api_key, lead_id, since_date):
     return data.get("data", [])
 
 
-def fetch_recent_calls(api_key, since_date):
-    """Fetch calls created or updated since last sync via bulk endpoint.
+NON_TERMINAL_CALL_STATUSES = ["in-progress", "created"]
 
-    Filters on date_updated, not date_created: a call is first synced while
-    still 'in-progress' (duration 0), then completes minutes later. Filtering
-    on date_created would never re-fetch it, leaving a stale row forever.
-    date_updated advances when the call completes, so this catches the update.
+
+def fetch_recent_calls(api_key, since_date):
+    """Fetch calls created since last sync via bulk endpoint.
+
+    Note: the activity/call/ list endpoint silently ignores date_updated
+    filters, so this can only filter on date_created. A call first synced
+    while still 'in-progress' won't be re-fetched here once it completes —
+    refetch_stale_calls() handles that case by id.
     """
     rows = _fetch_all_pages_parallel("activity/call/", {
-        "date_updated__gte": since_date,
+        "date_created__gte": since_date,
         "_fields": "id,lead_id,user_id,date_created,duration,status",
     }, api_key, label="calls")
     return rows
+
+
+def _fetch_call_by_id(api_key, call_id):
+    """Re-fetch a single call activity by id. Returns dict or None if gone."""
+    try:
+        return close_get(
+            f"activity/call/{call_id}/",
+            params={"_fields": "id,lead_id,user_id,date_created,duration,status"},
+            api_key=api_key,
+        )
+    except Exception as e:
+        print(f"  Warning: failed to re-fetch call {call_id}: {e}")
+        return None
+
+
+def refetch_stale_calls(api_key, sb):
+    """Re-fetch calls still in a non-terminal status and upsert fresh values.
+
+    A call is first synced while 'in-progress' (duration 0), then completes
+    minutes later. The bulk date_created query won't re-fetch it (its
+    date_created is now older than the cursor) and the list endpoint ignores
+    date_updated, so we re-fetch any non-terminal calls by id each sync.
+    Returns the number of calls refreshed.
+    """
+    stale_ids = []
+    for status in NON_TERMINAL_CALL_STATUSES:
+        rows = sb.table("calls").select("id").eq("status", status).execute()
+        stale_ids.extend(r["id"] for r in rows.data)
+    if not stale_ids:
+        return 0
+
+    fresh = []
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        futures = {executor.submit(_fetch_call_by_id, api_key, cid): cid for cid in stale_ids}
+        for future in as_completed(futures):
+            call = future.result()
+            if call:
+                fresh.append(call)
+
+    if fresh:
+        upsert_calls(sb, fresh)
+    return len(fresh)
 
 
 def fetch_calls_paginated(api_key, since_date, skip_from=0, max_pages=10):
@@ -101,12 +146,9 @@ def fetch_calls_paginated(api_key, since_date, skip_from=0, max_pages=10):
     Fires up to `max_pages` pages in parallel starting from `skip_from`.
     Returns early when a page has < 100 rows (end of data).
     Used by api/sync.py to stay within the ~5s time budget per step.
-
-    Filters on date_updated (see fetch_recent_calls) so calls that completed
-    after their initial in-progress sync get re-fetched.
     """
     base_params = {
-        "date_updated__gte": since_date,
+        "date_created__gte": since_date,
         "_fields": "id,lead_id,user_id,date_created,duration,status",
         "_limit": 100,
     }
@@ -204,6 +246,13 @@ def run_sync(api_key=None):
     if call_rows:
         upsert_calls(sb, call_rows)
 
+    # 2b. Re-fetch calls still in a non-terminal status — they may have
+    # completed since their initial sync (the bulk query above won't catch it).
+    print("\n2b. Re-fetching stale (non-terminal) calls...")
+    t0 = time.time()
+    refreshed = refetch_stale_calls(api_key, sb)
+    print(f"  Re-fetched {refreshed} calls ({time.time()-t0:.1f}s)")
+
     # 3. Check for new leads
     print("\n3. Checking for new leads...")
     t0 = time.time()
@@ -254,6 +303,7 @@ def run_sync(api_key=None):
         "opportunities": len(raw_opps),
         "status_changes": len(changes),
         "calls": len(call_rows),
+        "stale_calls_refreshed": refreshed,
         "new_leads": len(missing),
     }
 
@@ -266,6 +316,7 @@ def main():
     print(f"  Opportunities: {result['opportunities']}")
     print(f"  Status changes: {result['status_changes']}")
     print(f"  Calls: {result['calls']}")
+    print(f"  Stale calls refreshed: {result['stale_calls_refreshed']}")
     print(f"  New leads: {result['new_leads']}")
     print(f"  Cursor: {result['new_cursor']}")
 
